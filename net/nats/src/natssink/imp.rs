@@ -17,6 +17,7 @@ const DEFAULT_DRAIN_TIMEOUT: u64 = 2_000_000_000;
 struct Settings {
     connection: ConnectionSettings,
     subject: String,
+    headers: gst::Array,
     queue_capacity: u32,
     drop_on_full: bool,
     drain_timeout: u64,
@@ -27,6 +28,7 @@ impl Default for Settings {
         Self {
             connection: ConnectionSettings::default(),
             subject: String::new(),
+            headers: gst::Array::default(),
             queue_capacity: DEFAULT_QUEUE_CAPACITY,
             drop_on_full: false,
             drain_timeout: DEFAULT_DRAIN_TIMEOUT,
@@ -51,6 +53,7 @@ enum State {
         failure: Arc<Mutex<Option<String>>>,
         error_posted: Arc<AtomicBool>,
         flushing: bool,
+        fixed_headers: Option<async_nats::HeaderMap>,
         drain_timeout: std::time::Duration,
     },
 }
@@ -126,6 +129,17 @@ impl ObjectImpl for NatsSink {
                     .default_value(Some(""))
                     .mutable_ready()
                     .build(),
+                gst::ParamSpecArray::builder("headers")
+                    .nick("Headers")
+                    .blurb("Fixed NATS headers published before GstNatsMessageMeta headers")
+                    .element_spec(
+                        &glib::ParamSpecBoxed::builder::<gst::Structure>("nats-header")
+                            .nick("NATS Header")
+                            .blurb("Structure with string name and value fields")
+                            .build(),
+                    )
+                    .mutable_ready()
+                    .build(),
                 glib::ParamSpecUInt::builder("queue-capacity")
                     .nick("Queue Capacity")
                     .blurb("Maximum messages awaiting asynchronous publication")
@@ -167,6 +181,11 @@ impl ObjectImpl for NatsSink {
                     settings.subject = subject;
                 }
             }
+            "headers" => {
+                if let Ok(headers) = value.get::<gst::Array>() {
+                    settings.headers = headers;
+                }
+            }
             "queue-capacity" => {
                 if let Ok(capacity) = value.get::<u32>() {
                     settings.queue_capacity = capacity;
@@ -193,6 +212,7 @@ impl ObjectImpl for NatsSink {
         }
         match pspec.name() {
             "subject" => settings.subject.to_value(),
+            "headers" => settings.headers.to_value(),
             "queue-capacity" => settings.queue_capacity.to_value(),
             "drop-on-full" => settings.drop_on_full.to_value(),
             "drain-timeout" => settings.drain_timeout.to_value(),
@@ -252,6 +272,9 @@ impl BaseSinkImpl for NatsSink {
         {
             return Err(Self::settings_error("subject contains whitespace"));
         }
+        let fixed_headers =
+            message_meta::headers_from_array(&settings.headers).map_err(Self::settings_error)?;
+        let fixed_headers = (!fixed_headers.is_empty()).then_some(fixed_headers);
         let capacity = usize::try_from(settings.queue_capacity).map_err(Self::settings_error)?;
         let options = settings
             .connection
@@ -289,6 +312,7 @@ impl BaseSinkImpl for NatsSink {
             failure,
             error_posted,
             flushing: false,
+            fixed_headers,
             drain_timeout: std::time::Duration::from_nanos(settings.drain_timeout),
         };
         Ok(())
@@ -356,14 +380,13 @@ impl BaseSinkImpl for NatsSink {
         let map = buffer
             .map_readable()
             .map_err(|error| self.render_error(format!("failed to map input buffer: {error}")))?;
-        let request = PublishRequest {
-            subject,
-            reply_subject: envelope
-                .as_ref()
-                .and_then(|envelope| envelope.reply_subject.clone()),
-            headers: envelope.and_then(|envelope| envelope.headers),
-            payload: map.as_slice().to_vec(),
-        };
+        let reply_subject = envelope
+            .as_ref()
+            .and_then(|envelope| envelope.reply_subject.clone());
+        let message_headers = envelope
+            .as_ref()
+            .and_then(|envelope| envelope.headers.as_ref());
+        let payload = map.as_slice().to_vec();
 
         let state = self.state();
         let State::Started {
@@ -371,6 +394,7 @@ impl BaseSinkImpl for NatsSink {
             failure,
             error_posted,
             flushing,
+            fixed_headers,
             ..
         } = &*state
         else {
@@ -389,6 +413,12 @@ impl BaseSinkImpl for NatsSink {
         let sender = sender.as_ref().ok_or_else(|| {
             self.render_worker_error("publication worker is closed", error_posted)
         })?;
+        let request = PublishRequest {
+            subject,
+            reply_subject,
+            headers: message_meta::merge_headers(fixed_headers.as_ref(), message_headers),
+            payload,
+        };
         match sender.try_send(request) {
             Ok(()) => Ok(gst::FlowSuccess::Ok),
             Err(tokio::sync::mpsc::error::TrySendError::Full(_)) if settings.drop_on_full => {
@@ -532,6 +562,7 @@ mod tests {
             failure: Arc::new(Mutex::new(None)),
             error_posted: Arc::new(AtomicBool::new(false)),
             flushing: false,
+            fixed_headers: None,
             drain_timeout: std::time::Duration::ZERO,
         };
         (sink, receiver)

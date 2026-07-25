@@ -69,7 +69,7 @@ pub fn read(buffer: &gst::BufferRef) -> Result<Envelope, String> {
     };
 
     let headers = match structure.get_optional::<gst::Array>("headers") {
-        Ok(Some(array)) => Some(array_to_headers(&array)?),
+        Ok(Some(array)) => Some(headers_from_array(&array)?),
         Ok(None) => None,
         Err(_) => return Err("GstNatsMessageMeta headers is not an array".to_owned()),
     };
@@ -110,30 +110,43 @@ fn headers_to_array(headers: &async_nats::HeaderMap) -> gst::Array {
     values.collect::<gst::Array>()
 }
 
-fn array_to_headers(array: &gst::Array) -> Result<async_nats::HeaderMap, String> {
+pub fn headers_from_array(array: &gst::Array) -> Result<async_nats::HeaderMap, String> {
     let mut headers = async_nats::HeaderMap::new();
     for value in array.iter() {
         let structure = value
             .get::<gst::Structure>()
-            .map_err(|_error| "GstNatsMessageMeta header entry is not a structure".to_owned())?;
+            .map_err(|_error| "NATS header entry is not a structure".to_owned())?;
         if structure.name() != "nats-header" {
-            return Err("GstNatsMessageMeta header structure must be named nats-header".to_owned());
+            return Err("NATS header structure must be named nats-header".to_owned());
         }
         let name = structure
             .get::<String>("name")
-            .map_err(|_error| "GstNatsMessageMeta header name is missing or invalid".to_owned())?;
+            .map_err(|_error| "NATS header name is missing or invalid".to_owned())?;
         let value = structure
             .get::<String>("value")
-            .map_err(|_error| "GstNatsMessageMeta header value is missing or invalid".to_owned())?;
-        let name = async_nats::HeaderName::from_str(&name).map_err(|_error| {
-            "GstNatsMessageMeta contains an invalid NATS header name".to_owned()
-        })?;
-        let value = async_nats::HeaderValue::from_str(&value).map_err(|_error| {
-            "GstNatsMessageMeta contains an invalid NATS header value".to_owned()
-        })?;
+            .map_err(|_error| "NATS header value is missing or invalid".to_owned())?;
+        let name = async_nats::HeaderName::from_str(&name)
+            .map_err(|_error| "NATS header name is invalid".to_owned())?;
+        let value = async_nats::HeaderValue::from_str(&value)
+            .map_err(|_error| "NATS header value is invalid".to_owned())?;
         headers.append(name, value);
     }
     Ok(headers)
+}
+
+pub fn merge_headers(
+    fixed: Option<&async_nats::HeaderMap>,
+    message: Option<&async_nats::HeaderMap>,
+) -> Option<async_nats::HeaderMap> {
+    let mut merged = async_nats::HeaderMap::new();
+    for headers in [fixed, message].into_iter().flatten() {
+        for (name, values) in headers.iter() {
+            for value in values {
+                merged.append(name.clone(), value.clone());
+            }
+        }
+    }
+    (!merged.is_empty()).then_some(merged)
 }
 
 #[cfg(test)]
@@ -204,5 +217,25 @@ mod tests {
             read(&buffer).err().as_deref(),
             Some("GstNatsMessageMeta subject is missing or is not a string")
         );
+    }
+
+    #[test]
+    fn fixed_headers_are_merged_before_message_headers_with_duplicates() {
+        let mut fixed = async_nats::HeaderMap::new();
+        fixed.append("X-Test", "fixed-one");
+        fixed.append("X-Test", "fixed-two");
+        let mut message = async_nats::HeaderMap::new();
+        message.append("X-Test", "message-one");
+        message.append("X-Test", "message-two");
+
+        let merged = merge_headers(Some(&fixed), Some(&message)).expect("merged headers");
+        assert_eq!(
+            merged
+                .get_all("X-Test")
+                .map(async_nats::HeaderValue::as_str)
+                .collect::<Vec<_>>(),
+            ["fixed-one", "fixed-two", "message-one", "message-two"]
+        );
+        assert!(merge_headers(None, None).is_none());
     }
 }

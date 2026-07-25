@@ -85,6 +85,7 @@ fn nats_property_defaults_match_contract() {
     let sink = element("natssink");
     assert_shared_defaults(&sink);
     assert_eq!(sink.property::<String>("subject"), "");
+    assert!(sink.property::<gst::Array>("headers").is_empty());
     assert_eq!(sink.property::<u32>("queue-capacity"), 64);
     assert!(!sink.property::<bool>("drop-on-full"));
     assert_eq!(sink.property::<u64>("drain-timeout"), 2_000_000_000);
@@ -117,11 +118,25 @@ fn nats_properties_round_trip_in_ready() {
     assert_eq!(source.property::<Option<gst::Caps>>("caps"), Some(caps));
 
     let sink = element("natssink");
+    let headers = gst::Array::new([
+        gst::Structure::builder("nats-header")
+            .field("name", "X-Test")
+            .field("value", "one")
+            .build()
+            .to_send_value(),
+        gst::Structure::builder("nats-header")
+            .field("name", "X-Test")
+            .field("value", "two")
+            .build()
+            .to_send_value(),
+    ]);
     sink.set_property("subject", "events.out");
+    sink.set_property("headers", &headers);
     sink.set_property("queue-capacity", 3_u32);
     sink.set_property("drop-on-full", true);
     sink.set_property("drain-timeout", 17_u64);
     assert_eq!(sink.property::<String>("subject"), "events.out");
+    assert_eq!(sink.property::<gst::Array>("headers").len(), 2);
     assert_eq!(sink.property::<u32>("queue-capacity"), 3);
     assert!(sink.property::<bool>("drop-on-full"));
     assert_eq!(sink.property::<u64>("drain-timeout"), 17);
@@ -149,7 +164,13 @@ fn nats_properties_have_ready_mutability_and_counter_is_read_only() {
         ),
         (
             "natssink",
-            &["subject", "queue-capacity", "drop-on-full", "drain-timeout"][..],
+            &[
+                "subject",
+                "headers",
+                "queue-capacity",
+                "drop-on-full",
+                "drain-timeout",
+            ][..],
         ),
     ] {
         let element = element(factory);
@@ -195,6 +216,25 @@ fn nats_rejects_malformed_shared_settings_before_network_setup() {
             .set_state(gst::State::Null)
             .expect("element back to NULL");
     }
+}
+
+#[test]
+fn natssink_rejects_malformed_fixed_headers_before_network_setup() {
+    let sink = element("natssink");
+    sink.set_property("subject", "events");
+    sink.set_property(
+        "headers",
+        gst::Array::new([gst::Structure::builder("not-a-nats-header")
+            .field("name", "X-Test")
+            .field("value", "one")
+            .build()
+            .to_send_value()]),
+    );
+    assert_eq!(
+        sink.set_state(gst::State::Paused),
+        Err(gst::StateChangeError)
+    );
+    sink.set_state(gst::State::Null).expect("sink back to NULL");
 }
 
 #[test]

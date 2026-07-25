@@ -316,6 +316,21 @@ fn meta_buffer(payload: Vec<u8>, subject: &str, reply: &str) -> gst::Buffer {
     buffer
 }
 
+fn fixed_headers() -> gst::Array {
+    gst::Array::new([
+        gst::Structure::builder("nats-header")
+            .field("name", "X-Duplicate")
+            .field("value", "fixed-one")
+            .build()
+            .to_send_value(),
+        gst::Structure::builder("nats-header")
+            .field("name", "X-Duplicate")
+            .field("value", "fixed-two")
+            .build()
+            .to_send_value(),
+    ])
+}
+
 #[test]
 #[ignore = "requires NATS_TEST_URL and a real Core NATS server"]
 fn natssink_republishes_envelope_and_fixed_subject_overrides_only_subject() {
@@ -355,6 +370,7 @@ fn natssink_republishes_envelope_and_fixed_subject_overrides_only_subject() {
     let fixed_sink = gst::ElementFactory::make("natssink")
         .property("servers", broker_url())
         .property("subject", &fixed_subject)
+        .property("headers", fixed_headers())
         .build()
         .expect("constructing fixed sink");
     let mut fixed = gst_check::Harness::with_element(&fixed_sink, Some("sink"), None);
@@ -371,8 +387,9 @@ fn natssink_republishes_envelope_and_fixed_subject_overrides_only_subject() {
             .headers
             .expect("fixed headers")
             .get_all("X-Duplicate")
-            .count(),
-        2
+            .map(async_nats::HeaderValue::as_str)
+            .collect::<Vec<_>>(),
+        ["fixed-one", "fixed-two", "one", "two"]
     );
 }
 

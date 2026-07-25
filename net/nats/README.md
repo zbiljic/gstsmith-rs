@@ -89,6 +89,7 @@ pipeline running time.
 | Property | Default | Meaning |
 |---|---:|---|
 | `subject` | empty | Fixed subject, or use message metadata |
+| `headers` | empty | Array of fixed `nats-header` structures |
 | `queue-capacity` | `64` | Messages awaiting the async publisher |
 | `drop-on-full` | `false` | Drop newest instead of failing on overflow |
 | `drain-timeout` | `2000000000` | Stop-time drain/flush limit, nanoseconds |
@@ -99,6 +100,12 @@ very large buffers should choose a correspondingly small queue. Overflow is an
 error by default. With `drop-on-full=true`, the newest buffer is dropped and
 `dropped-messages` is incremented.
 
+Each `headers` entry is a `nats-header` structure with string `name` and
+`value` fields, matching the message metadata format below. Repeated names are
+preserved. Fixed headers are published first, followed by per-buffer metadata
+headers, so both values remain available when a name appears in both places.
+Malformed entries fail element startup before the broker connection is made.
+
 ## Message envelope metadata
 
 `natssrc` attaches simple custom meta named `GstNatsMessageMeta`:
@@ -108,7 +115,8 @@ error by default. With `drop-on-full=true`, the newest buffer is dropped and
 - `headers`: optional array of `nats-header` structures, each containing
   string `name` and `value` fields. Repeated names remain separate entries.
 
-`natssink` passes the reply subject and headers through. A non-empty sink
-`subject` overrides only the metadata subject. With an empty sink subject,
-valid metadata is required. The metadata is an envelope bridge only; it does
-not make the source a request/reply responder.
+`natssink` passes the reply subject and headers through, appending them after
+its fixed `headers`. A non-empty sink `subject` overrides only the metadata
+subject. With an empty sink subject, valid metadata is required. The metadata
+is an envelope bridge only; it does not make the source a request/reply
+responder.
