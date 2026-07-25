@@ -7,11 +7,12 @@ and elements written in Rust.
 
 - [`generic`](generic/)
 
-  - [`console`](generic/console/): Console I/O for UTF-8 text and JSON buffers.
-    - `consolesrc`: Read buffers from standard input.
-    - `consoleprint`: Write buffers to standard output or error and pass them
-      downstream.
-    - `consolesink`: Write buffers to standard output or error.
+  - [`console`](generic/console/): Console byte transports and a text-oriented
+    debug tap.
+    - `consolesrc`: Read raw byte chunks from standard input.
+    - `consoleprint`: Print text-oriented buffers and pass them downstream
+      unchanged.
+    - `consolesink`: Write exact bytes to standard output or error.
 
 - [`text`](text/)
 

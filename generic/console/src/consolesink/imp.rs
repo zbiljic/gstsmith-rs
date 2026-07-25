@@ -5,11 +5,11 @@ use gst::subclass::prelude::*;
 use gst_base::prelude::*;
 use gst_base::subclass::prelude::*;
 
-use crate::output::{Output, OutputError, text_caps};
+use crate::output::RawOutput;
 
 #[derive(Default)]
 pub struct ConsoleSink {
-    output: Output,
+    output: RawOutput,
 }
 
 #[glib::object_subclass]
@@ -26,7 +26,8 @@ impl ObjectImpl for ConsoleSink {
     }
 
     fn properties() -> &'static [glib::ParamSpec] {
-        static PROPERTIES: LazyLock<Vec<glib::ParamSpec>> = LazyLock::new(Output::property_specs);
+        static PROPERTIES: LazyLock<Vec<glib::ParamSpec>> =
+            LazyLock::new(RawOutput::property_specs);
 
         PROPERTIES.as_ref()
     }
@@ -47,8 +48,8 @@ impl ElementImpl for ConsoleSink {
         static METADATA: LazyLock<gst::subclass::ElementMetadata> = LazyLock::new(|| {
             gst::subclass::ElementMetadata::new(
                 "Console Sink",
-                "Sink/Debug",
-                "Writes UTF-8 buffer contents to stdout or stderr",
+                "Sink/Generic",
+                "Writes buffer bytes exactly to stdout or stderr",
                 "Nemanja Zbiljic <nemanja.zbiljic@gmail.com>",
             )
         });
@@ -62,12 +63,11 @@ impl ElementImpl for ConsoleSink {
     )]
     fn pad_templates() -> &'static [gst::PadTemplate] {
         static TEMPLATES: LazyLock<Vec<gst::PadTemplate>> = LazyLock::new(|| {
-            let caps = text_caps();
             let sink = gst::PadTemplate::new(
                 "sink",
                 gst::PadDirection::Sink,
                 gst::PadPresence::Always,
-                &caps,
+                &gst::Caps::new_any(),
             )
             .expect("constructing the consolesink pad template");
 
@@ -90,22 +90,11 @@ impl BaseSinkImpl for ConsoleSink {
         })?;
 
         self.output.write(map.as_slice()).map_err(|error| {
-            match error {
-                OutputError::InvalidUtf8(error) => {
-                    gst::element_imp_error!(
-                        self,
-                        gst::StreamError::Format,
-                        ["Input buffer is not valid UTF-8: {error}"]
-                    );
-                }
-                OutputError::Write(error) => {
-                    gst::element_imp_error!(
-                        self,
-                        gst::ResourceError::Write,
-                        ["Failed to write to the console: {error}"]
-                    );
-                }
-            }
+            gst::element_imp_error!(
+                self,
+                gst::ResourceError::Write,
+                ["Failed to write to the console: {error}"]
+            );
             gst::FlowError::Error
         })?;
 

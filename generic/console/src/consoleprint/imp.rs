@@ -4,11 +4,11 @@ use gst::glib;
 use gst::subclass::prelude::*;
 use gst_base::subclass::prelude::*;
 
-use crate::output::{Output, OutputError, text_caps};
+use crate::output::{OutputError, TextOutput, text_caps};
 
 #[derive(Default)]
 pub struct ConsolePrint {
-    output: Output,
+    output: TextOutput,
 }
 
 #[glib::object_subclass]
@@ -20,7 +20,8 @@ impl ObjectSubclass for ConsolePrint {
 
 impl ObjectImpl for ConsolePrint {
     fn properties() -> &'static [glib::ParamSpec] {
-        static PROPERTIES: LazyLock<Vec<glib::ParamSpec>> = LazyLock::new(Output::property_specs);
+        static PROPERTIES: LazyLock<Vec<glib::ParamSpec>> =
+            LazyLock::new(TextOutput::property_specs);
 
         PROPERTIES.as_ref()
     }

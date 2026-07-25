@@ -1,11 +1,11 @@
 [package]
 name = "gst-plugin-console"
-description = "GStreamer console I/O elements for UTF-8 text and JSON buffers."
+description = "GStreamer console byte transports and a text-oriented debug tap."
 version = { workspace = true }
 edition = { workspace = true }
 authors = { workspace = true }
 rust-version = { workspace = true }
-readme = { workspace = true }
+readme = "README.md"
 license = { workspace = true }
 repository = { workspace = true }
 

@@ -4,11 +4,8 @@ use gst::glib;
 use gst::prelude::*;
 use gst::subclass::prelude::*;
 
-use crate::output::text_caps;
-
 pub struct ConsoleSrc {
     source: gst::Element,
-    filter: gst::Element,
     src_pad: gst::GhostPad,
 }
 
@@ -20,7 +17,7 @@ impl ObjectSubclass for ConsoleSrc {
 
     #[expect(
         clippy::expect_used,
-        reason = "the required core elements and static source pad template are plugin invariants"
+        reason = "the required core source element and static source pad template are plugin invariants"
     )]
     fn with_class(class: &Self::Class) -> Self {
         let source = gst::ElementFactory::make("fdsrc")
@@ -28,18 +25,12 @@ impl ObjectSubclass for ConsoleSrc {
             .property("fd", 0_i32)
             .build()
             .expect("constructing the standard-input fdsrc");
-        let filter = gst::ElementFactory::make("capsfilter")
-            .name("caps")
-            .property("caps", text_caps())
-            .build()
-            .expect("constructing the console capsfilter");
         let template = class
             .pad_template("src")
             .expect("finding the consolesrc source pad template");
 
         Self {
             source,
-            filter,
             src_pad: gst::GhostPad::from_template(&template),
         }
     }
@@ -48,7 +39,7 @@ impl ObjectSubclass for ConsoleSrc {
 impl ObjectImpl for ConsoleSrc {
     #[expect(
         clippy::expect_used,
-        reason = "the fixed internal source topology is constructed once and must be valid"
+        reason = "the fixed fdsrc source topology is constructed once and must be valid"
     )]
     fn constructed(&self) {
         self.parent_constructed();
@@ -56,19 +47,16 @@ impl ObjectImpl for ConsoleSrc {
         let obj = self.obj();
         obj.set_suppressed_flags(gst::ElementFlags::SINK | gst::ElementFlags::SOURCE);
         obj.set_element_flags(gst::ElementFlags::SOURCE);
-        obj.add_many([&self.source, &self.filter])
-            .expect("adding the consolesrc child elements");
-        self.source
-            .link(&self.filter)
-            .expect("linking the consolesrc child elements");
+        obj.add(&self.source)
+            .expect("adding the consolesrc fdsrc child element");
         obj.add_pad(&self.src_pad)
             .expect("adding the consolesrc source pad");
         self.src_pad
             .set_target(Some(
                 &self
-                    .filter
+                    .source
                     .static_pad("src")
-                    .expect("finding the capsfilter source pad"),
+                    .expect("finding the fdsrc source pad"),
             ))
             .expect("targeting the consolesrc source pad");
     }
@@ -82,7 +70,7 @@ impl ElementImpl for ConsoleSrc {
             gst::subclass::ElementMetadata::new(
                 "Console Source",
                 "Source/Generic",
-                "Reads UTF-8 text or JSON buffers from standard input",
+                "Reads bytes from standard input",
                 "Nemanja Zbiljic <nemanja.zbiljic@gmail.com>",
             )
         });
@@ -100,7 +88,7 @@ impl ElementImpl for ConsoleSrc {
                 "src",
                 gst::PadDirection::Src,
                 gst::PadPresence::Always,
-                &text_caps(),
+                &gst::Caps::new_any(),
             )
             .expect("constructing the consolesrc source pad template");
 

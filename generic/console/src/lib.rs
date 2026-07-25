@@ -1,4 +1,4 @@
-//! `GStreamer` elements for reading and writing UTF-8 console buffers.
+//! `GStreamer` console byte transports and a text-oriented debug tap.
 
 use gst::glib;
 

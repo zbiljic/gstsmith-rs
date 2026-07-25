@@ -21,13 +21,18 @@ pub enum ConsoleStream {
     Stderr = 1,
 }
 
+#[derive(Clone, Copy, Debug, Default)]
+struct RawSettings {
+    stream: ConsoleStream,
+}
+
 #[derive(Clone, Copy, Debug)]
-struct Settings {
+struct TextSettings {
     stream: ConsoleStream,
     ensure_newline: bool,
 }
 
-impl Default for Settings {
+impl Default for TextSettings {
     fn default() -> Self {
         Self {
             stream: ConsoleStream::Stdout,
@@ -43,18 +48,51 @@ pub(crate) enum OutputError {
 }
 
 #[derive(Debug, Default)]
-pub(crate) struct Output {
-    settings: Mutex<Settings>,
+pub(crate) struct RawOutput {
+    settings: Mutex<RawSettings>,
 }
 
-impl Output {
+impl RawOutput {
+    pub(crate) fn property_specs() -> Vec<glib::ParamSpec> {
+        vec![stream_property_spec()]
+    }
+
+    pub(crate) fn set_property(&self, value: &glib::Value, pspec: &glib::ParamSpec) {
+        if pspec.name() == "stream"
+            && let Ok(stream) = value.get::<ConsoleStream>()
+        {
+            self.lock_settings().stream = stream;
+        }
+    }
+
+    pub(crate) fn property(&self, pspec: &glib::ParamSpec) -> glib::Value {
+        if pspec.name() == "stream" {
+            return self.lock_settings().stream.to_value();
+        }
+
+        pspec.default_value().clone()
+    }
+
+    pub(crate) fn write(&self, payload: &[u8]) -> io::Result<()> {
+        let stream = self.lock_settings().stream;
+
+        write_to_stream(stream, payload)
+    }
+
+    fn lock_settings(&self) -> MutexGuard<'_, RawSettings> {
+        self.settings.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+}
+
+#[derive(Debug, Default)]
+pub(crate) struct TextOutput {
+    settings: Mutex<TextSettings>,
+}
+
+impl TextOutput {
     pub(crate) fn property_specs() -> Vec<glib::ParamSpec> {
         vec![
-            glib::ParamSpecEnum::builder::<ConsoleStream>("stream")
-                .nick("Stream")
-                .blurb("Standard stream to write to")
-                .default_value(ConsoleStream::Stdout)
-                .build(),
+            stream_property_spec(),
             glib::ParamSpecBoolean::builder("ensure-newline")
                 .nick("Ensure newline")
                 .blurb("Append a newline when the buffer does not already end with one")
@@ -93,27 +131,26 @@ impl Output {
 
     pub(crate) fn write(&self, payload: &[u8]) -> Result<(), OutputError> {
         let settings = *self.lock_settings();
-        let record =
-            prepare_record(payload, settings.ensure_newline).map_err(OutputError::InvalidUtf8)?;
+        let record = prepare_text_record(payload, settings.ensure_newline)
+            .map_err(OutputError::InvalidUtf8)?;
 
-        match settings.stream {
-            ConsoleStream::Stdout => {
-                let mut stream = io::stdout().lock();
-                write_record(&mut stream, &record).map_err(OutputError::Write)
-            }
-            ConsoleStream::Stderr => {
-                let mut stream = io::stderr().lock();
-                write_record(&mut stream, &record).map_err(OutputError::Write)
-            }
-        }
+        write_to_stream(settings.stream, &record).map_err(OutputError::Write)
     }
 
-    fn lock_settings(&self) -> MutexGuard<'_, Settings> {
+    fn lock_settings(&self) -> MutexGuard<'_, TextSettings> {
         self.settings.lock().unwrap_or_else(PoisonError::into_inner)
     }
 }
 
-fn prepare_record(payload: &[u8], ensure_newline: bool) -> Result<Cow<'_, [u8]>, Utf8Error> {
+fn stream_property_spec() -> glib::ParamSpec {
+    glib::ParamSpecEnum::builder::<ConsoleStream>("stream")
+        .nick("Stream")
+        .blurb("Standard stream to write to")
+        .default_value(ConsoleStream::Stdout)
+        .build()
+}
+
+fn prepare_text_record(payload: &[u8], ensure_newline: bool) -> Result<Cow<'_, [u8]>, Utf8Error> {
     let _text = std::str::from_utf8(payload)?;
 
     if !ensure_newline || payload.ends_with(b"\n") {
@@ -126,8 +163,21 @@ fn prepare_record(payload: &[u8], ensure_newline: bool) -> Result<Cow<'_, [u8]>,
     Ok(Cow::Owned(record))
 }
 
-fn write_record(writer: &mut impl Write, record: &[u8]) -> io::Result<()> {
-    writer.write_all(record)?;
+fn write_to_stream(stream: ConsoleStream, payload: &[u8]) -> io::Result<()> {
+    match stream {
+        ConsoleStream::Stdout => {
+            let mut stdout = io::stdout().lock();
+            write_bytes(&mut stdout, payload)
+        }
+        ConsoleStream::Stderr => {
+            let mut stderr = io::stderr().lock();
+            write_bytes(&mut stderr, payload)
+        }
+    }
+}
+
+fn write_bytes(writer: &mut impl Write, payload: &[u8]) -> io::Result<()> {
+    writer.write_all(payload)?;
     writer.flush()
 }
 
@@ -149,7 +199,7 @@ mod tests {
 
     #[test]
     fn leaves_payload_unchanged_when_newline_is_disabled() {
-        let record = prepare_record(b"hello", false).expect("valid UTF-8");
+        let record = prepare_text_record(b"hello", false).expect("valid UTF-8");
 
         assert_eq!(record.as_ref(), b"hello");
         assert!(matches!(record, Cow::Borrowed(_)));
@@ -157,7 +207,7 @@ mod tests {
 
     #[test]
     fn adds_one_missing_newline() {
-        let record = prepare_record(b"hello", true).expect("valid UTF-8");
+        let record = prepare_text_record(b"hello", true).expect("valid UTF-8");
 
         assert_eq!(record.as_ref(), b"hello\n");
         assert!(matches!(record, Cow::Owned(_)));
@@ -165,7 +215,7 @@ mod tests {
 
     #[test]
     fn preserves_existing_newline() {
-        let record = prepare_record(b"hello\n", true).expect("valid UTF-8");
+        let record = prepare_text_record(b"hello\n", true).expect("valid UTF-8");
 
         assert_eq!(record.as_ref(), b"hello\n");
         assert!(matches!(record, Cow::Borrowed(_)));
@@ -173,15 +223,16 @@ mod tests {
 
     #[test]
     fn rejects_invalid_utf8() {
-        let _error = prepare_record(&[0xff], true).expect_err("invalid UTF-8 must be rejected");
+        let _error =
+            prepare_text_record(&[0xff], true).expect_err("invalid UTF-8 must be rejected");
     }
 
     #[test]
-    fn writes_the_prepared_record() {
+    fn raw_writer_preserves_arbitrary_bytes_exactly() {
         let mut output = Vec::new();
 
-        write_record(&mut output, b"hello\n").expect("write to memory");
+        write_bytes(&mut output, &[0x00, 0xff, b'\n']).expect("write to memory");
 
-        assert_eq!(output, b"hello\n");
+        assert_eq!(output, &[0x00, 0xff, b'\n']);
     }
 }

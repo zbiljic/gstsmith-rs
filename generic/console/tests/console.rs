@@ -26,21 +26,36 @@ fn registers_all_elements() {
 }
 
 #[test]
-fn exposes_text_and_json_caps() {
+fn transport_elements_expose_any_caps() {
     init();
 
-    for (factory, pad_name) in [
-        ("consolesrc", "src"),
-        ("consoleprint", "sink"),
-        ("consoleprint", "src"),
-        ("consolesink", "sink"),
-    ] {
+    for (factory, pad_name) in [("consolesrc", "src"), ("consolesink", "sink")] {
         let element = gst::ElementFactory::make(factory)
             .build()
             .expect("constructing console element");
         let pad = element
             .static_pad(pad_name)
             .expect("finding the console element pad");
+        let caps = pad.pad_template_caps();
+
+        assert!(
+            caps.is_any(),
+            "{factory}:{pad_name} does not expose ANY caps"
+        );
+    }
+}
+
+#[test]
+fn consoleprint_exposes_text_and_json_caps() {
+    init();
+
+    for pad_name in ["sink", "src"] {
+        let element = gst::ElementFactory::make("consoleprint")
+            .build()
+            .expect("constructing consoleprint");
+        let pad = element
+            .static_pad(pad_name)
+            .expect("finding the consoleprint pad");
         let caps = pad.pad_template_caps();
 
         for expected in [
@@ -51,14 +66,14 @@ fn exposes_text_and_json_caps() {
             let expected = gst::Caps::from_str(expected).expect("valid test caps");
             assert!(
                 caps.can_intersect(&expected),
-                "{factory}:{pad_name} is missing caps {expected}"
+                "consoleprint:{pad_name} is missing caps {expected}"
             );
         }
 
         let binary = gst::Caps::from_str("application/octet-stream").expect("valid test caps");
         assert!(
             !caps.can_intersect(&binary),
-            "{factory}:{pad_name} accepts binary caps"
+            "consoleprint:{pad_name} accepts binary caps"
         );
     }
 }
@@ -73,7 +88,6 @@ fn consolesrc_reads_standard_input_through_core_elements() {
         .downcast::<gst::Bin>()
         .expect("consolesrc is a bin");
     let stdin = source.by_name("stdin").expect("finding the stdin source");
-    let caps = source.by_name("caps").expect("finding the caps filter");
 
     assert!(
         stdin
@@ -81,36 +95,79 @@ fn consolesrc_reads_standard_input_through_core_elements() {
             .is_some_and(|factory| factory.name() == "fdsrc")
     );
     assert_eq!(stdin.property::<i32>("fd"), 0);
-    assert!(
-        caps.factory()
-            .is_some_and(|factory| factory.name() == "capsfilter")
+    assert!(source.by_name("caps").is_none());
+}
+
+#[test]
+fn consolesink_exposes_only_stream_property() {
+    init();
+
+    let element = gst::ElementFactory::make("consolesink")
+        .build()
+        .expect("constructing consolesink");
+
+    assert!(element.find_property("stream").is_some());
+    assert!(element.find_property("ensure-newline").is_none());
+    assert_eq!(
+        element.property::<gstconsole::ConsoleStream>("stream"),
+        gstconsole::ConsoleStream::Stdout
+    );
+
+    element.set_property("stream", gstconsole::ConsoleStream::Stderr);
+
+    assert_eq!(
+        element.property::<gstconsole::ConsoleStream>("stream"),
+        gstconsole::ConsoleStream::Stderr
     );
 }
 
 #[test]
-fn properties_round_trip_on_both_elements() {
+fn consoleprint_retains_text_output_properties() {
     init();
 
-    for factory in ["consolesink", "consoleprint"] {
-        let element = gst::ElementFactory::make(factory)
-            .build()
-            .expect("constructing console element");
+    let element = gst::ElementFactory::make("consoleprint")
+        .build()
+        .expect("constructing consoleprint");
 
-        assert_eq!(
-            element.property::<gstconsole::ConsoleStream>("stream"),
-            gstconsole::ConsoleStream::Stdout
-        );
-        assert!(element.property::<bool>("ensure-newline"));
+    assert!(element.find_property("stream").is_some());
+    assert!(element.find_property("ensure-newline").is_some());
+    assert_eq!(
+        element.property::<gstconsole::ConsoleStream>("stream"),
+        gstconsole::ConsoleStream::Stdout
+    );
+    assert!(element.property::<bool>("ensure-newline"));
 
-        element.set_property("stream", gstconsole::ConsoleStream::Stderr);
-        element.set_property("ensure-newline", false);
+    element.set_property("stream", gstconsole::ConsoleStream::Stderr);
+    element.set_property("ensure-newline", false);
 
-        assert_eq!(
-            element.property::<gstconsole::ConsoleStream>("stream"),
-            gstconsole::ConsoleStream::Stderr
-        );
-        assert!(!element.property::<bool>("ensure-newline"));
-    }
+    assert_eq!(
+        element.property::<gstconsole::ConsoleStream>("stream"),
+        gstconsole::ConsoleStream::Stderr
+    );
+    assert!(!element.property::<bool>("ensure-newline"));
+}
+
+#[test]
+fn console_transport_elements_link_to_core_elements() {
+    init();
+
+    let fakesrc = gst::ElementFactory::make("fakesrc")
+        .build()
+        .expect("constructing fakesrc");
+    let sink = gst::ElementFactory::make("consolesink")
+        .build()
+        .expect("constructing consolesink");
+    fakesrc.link(&sink).expect("linking fakesrc to consolesink");
+
+    let source = gst::ElementFactory::make("consolesrc")
+        .build()
+        .expect("constructing consolesrc");
+    let fakesink = gst::ElementFactory::make("fakesink")
+        .build()
+        .expect("constructing fakesink");
+    source
+        .link(&fakesink)
+        .expect("linking consolesrc to fakesink");
 }
 
 #[test]
@@ -144,15 +201,14 @@ fn consoleprint_passes_buffers_through_unchanged() {
 }
 
 #[test]
-fn consolesink_accepts_an_empty_utf8_buffer() {
+fn consolesink_accepts_an_empty_binary_buffer() {
     init();
 
     let element = gst::ElementFactory::make("consolesink")
-        .property("ensure-newline", false)
         .build()
         .expect("constructing consolesink");
     let mut harness = gst_check::Harness::with_element(&element, Some("sink"), None);
-    harness.set_src_caps_str("application/json");
+    harness.set_src_caps_str("application/octet-stream");
 
     assert_eq!(
         harness.push(gst::Buffer::from_mut_slice(Vec::<u8>::new())),
