@@ -230,6 +230,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "gst-plugin-lines"
+version = "0.1.0"
+dependencies = [
+ "gst-plugin-version-helper",
+ "gstreamer",
+ "gstreamer-base",
+ "gstreamer-check",
+ "memchr",
+]
+
+[[package]]
 name = "gst-plugin-version-helper"
 version = "0.8.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"

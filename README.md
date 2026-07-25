@@ -13,6 +13,14 @@ and elements written in Rust.
       downstream.
     - `consolesink`: Write buffers to standard output or error.
 
+- [`text`](text/)
+
+  - [`lines`](text/lines/): Bounded delimiter framing for arbitrary byte
+    streams.
+    - `lineparse`: Split stream chunks into record buffers and remove the
+      configured delimiter.
+    - `lineenc`: Ensure every record buffer ends with the configured delimiter.
+
 ## Building
 
 Install the pinned toolchain and build every plugin in the workspace:
