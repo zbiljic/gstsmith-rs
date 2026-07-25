@@ -19,6 +19,7 @@ where
     F: std::future::Future<Output = T>,
 {
     tokio::select! {
+        biased;
         () = cancel.cancelled() => None,
         output = future => Some(output),
     }
@@ -354,6 +355,9 @@ impl PushSrcImpl for NatsSrc {
             });
             return Err(gst::FlowError::Flushing);
         }
+        if cancel.is_cancelled() {
+            return Err(gst::FlowError::Flushing);
+        }
 
         let message = match next {
             None => return Err(gst::FlowError::Flushing),
@@ -397,11 +401,43 @@ mod tests {
         let started = std::time::Instant::now();
         let result = runtime::runtime()
             .expect("test runtime")
-            .block_on(wait_or_cancel(
-                &cancel,
-                std::future::pending::<Option<async_nats::Message>>(),
-            ));
+            .block_on(wait_or_cancel(&cancel, std::future::pending::<usize>()));
         assert!(result.is_none());
         assert!(started.elapsed() < std::time::Duration::from_millis(100));
+    }
+
+    #[test]
+    fn cancelled_wait_wins_when_message_is_ready() {
+        let cancel = CancellationToken::new();
+        cancel.cancel();
+        let result = runtime::runtime()
+            .expect("test runtime")
+            .block_on(wait_or_cancel(&cancel, std::future::ready(42)));
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn active_wait_returns_ready_message() {
+        let cancel = CancellationToken::new();
+        let result = runtime::runtime()
+            .expect("test runtime")
+            .block_on(wait_or_cancel(&cancel, std::future::ready(42)));
+        assert_eq!(result, Some(42));
+    }
+
+    #[test]
+    fn pending_wait_finishes_when_cancelled_later() {
+        let cancel = CancellationToken::new();
+        let cancellation = cancel.clone();
+        let result = runtime::runtime().expect("test runtime").block_on(async {
+            let wait = wait_or_cancel(&cancel, std::future::pending::<usize>());
+            let cancel_later = async move {
+                tokio::task::yield_now().await;
+                cancellation.cancel();
+            };
+            let (result, ()) = tokio::join!(wait, cancel_later);
+            result
+        });
+        assert!(result.is_none());
     }
 }
