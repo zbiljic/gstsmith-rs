@@ -42,7 +42,7 @@ All configurable properties are mutable only through READY.
 
 | Property | Default | Meaning |
 |---|---:|---|
-| `servers` | `nats://127.0.0.1:4222` | Comma-separated server URLs |
+| `servers` | `nats://127.0.0.1:4222` | Comma-separated server URLs without user-info |
 | `connection-name` | unset | Monitoring name; the element name is the fallback |
 | `credentials-file` | unset | User-credentials file containing JWT and seed |
 | `nkey-file` | unset | File containing an NKey seed |
@@ -56,7 +56,9 @@ All configurable properties are mutable only through READY.
 
 `credentials-file` and `nkey-file` are mutually exclusive. Client certificate
 and key files must be configured together. Raw JWTs, seeds, passwords, and
-tokens are intentionally not exposed as readable GObject properties.
+tokens are intentionally not exposed as readable GObject properties. Server
+URLs must not contain user-info; configure authentication with
+`credentials-file` or `nkey-file` instead.
 
 For a CA bundle:
 

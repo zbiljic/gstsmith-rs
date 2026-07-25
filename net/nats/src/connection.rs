@@ -45,7 +45,7 @@ impl ConnectionSettings {
         vec![
             glib::ParamSpecString::builder("servers")
                 .nick("Servers")
-                .blurb("Comma-separated Core NATS server URLs")
+                .blurb("Comma-separated Core NATS server URLs without user-info")
                 .default_value(Some(DEFAULT_SERVERS))
                 .mutable_ready()
                 .build(),
@@ -194,11 +194,15 @@ impl ConnectionSettings {
             .map(str::trim)
             .filter(|entry| !entry.is_empty())
             .map(|entry| {
-                entry
+                let server = entry
                     .parse::<async_nats::ServerAddr>()
                     .map_err(|_parse_error| {
                         "servers contains a malformed NATS server URL".to_owned()
-                    })
+                    })?;
+                if server.username().is_some() || server.password().is_some() {
+                    return Err("servers must not contain URL user-info".to_owned());
+                }
+                Ok(server)
             })
             .collect::<Result<Vec<_>, _>>()?;
         if servers.is_empty() {
@@ -383,6 +387,52 @@ mod tests {
             settings.validate().expect("servers validate").servers.len(),
             2
         );
+    }
+
+    #[test]
+    fn accepts_supported_server_urls_and_clusters() {
+        for servers in [
+            "nats://localhost:4222",
+            "tls://localhost:4222",
+            "ws://localhost:8080",
+            "wss://localhost:8443",
+            "nats://localhost:4222, tls://localhost:4223, ws://localhost:8080, wss://localhost:8443",
+        ] {
+            let settings = ConnectionSettings {
+                servers: servers.to_owned(),
+                ..ConnectionSettings::default()
+            };
+            settings
+                .validate()
+                .expect("supported server URL should validate");
+        }
+    }
+
+    #[test]
+    fn rejects_server_url_user_info_without_echoing_it() {
+        const USER_PLACEHOLDER: &str = "user-placeholder";
+        const PASSWORD_PLACEHOLDER: &str = "password-placeholder";
+
+        for servers in [
+            "nats://user-placeholder@localhost:4222",
+            "nats://user-placeholder:password-placeholder@localhost:4222",
+            "tls://user-placeholder:password-placeholder@localhost:4222",
+            "ws://user-placeholder:password-placeholder@localhost:8080",
+            "wss://user-placeholder:password-placeholder@localhost:8443",
+            "nats://localhost:4222, ws://user-placeholder:password-placeholder@localhost:8080",
+        ] {
+            let settings = ConnectionSettings {
+                servers: servers.to_owned(),
+                ..ConnectionSettings::default()
+            };
+            let Err(error) = settings.validate() else {
+                panic!("server URL user-info must be rejected");
+            };
+
+            assert_eq!(error, "servers must not contain URL user-info");
+            assert!(!error.contains(USER_PLACEHOLDER));
+            assert!(!error.contains(PASSWORD_PLACEHOLDER));
+        }
     }
 
     #[test]
