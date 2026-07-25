@@ -26,6 +26,11 @@ jobs:
     name: Run Checks
     runs-on: ${{ vars.RUNNER || 'ubuntu-latest' }}
     timeout-minutes: 20
+    services:
+      nats:
+        image: nats:2.12-alpine
+        ports:
+          - 4222:4222
 
     steps:
       - name: Checkout
@@ -64,6 +69,11 @@ jobs:
       - name: Run tests
         run: mise run test
 
+      - name: Run Core NATS integration tests
+        env:
+          NATS_TEST_URL: nats://127.0.0.1:4222
+        run: cargo test -p gst-plugin-nats --test nats_integration -- --ignored --test-threads=1
+
       - name: Build plugins
         run: mise run build
 
@@ -76,3 +86,8 @@ jobs:
         env:
           GST_PLUGIN_PATH: ${{ github.workspace }}/target/debug
         run: gst-inspect-1.0 lines
+
+      - name: Inspect NATS plugin
+        env:
+          GST_PLUGIN_PATH: ${{ github.workspace }}/target/debug
+        run: gst-inspect-1.0 nats

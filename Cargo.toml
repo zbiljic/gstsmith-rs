@@ -1,5 +1,5 @@
 [workspace]
-members = ["generic/console", "text/lines"]
+members = ["generic/console", "net/nats", "text/lines"]
 resolver = "3"
 
 [workspace.package]

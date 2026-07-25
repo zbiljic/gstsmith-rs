@@ -14,6 +14,12 @@ and elements written in Rust.
       unchanged.
     - `consolesink`: Write exact bytes to standard output or error.
 
+- [`net`](net/)
+
+  - [`nats`](net/nats/): Core NATS byte-message transports.
+    - `natssrc`: Subscribe to Core NATS subjects as one buffer per message.
+    - `natssink`: Publish one buffer per Core NATS message.
+
 - [`text`](text/)
 
   - [`lines`](text/lines/): Bounded delimiter framing for arbitrary byte
