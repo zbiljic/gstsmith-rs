@@ -5,8 +5,20 @@
     ":combinePatchMinorReleases",
     ":separateMultipleMajorReleases"
   ],
-  "enabledManagers": ["cargo", "github-actions", "mise"],
+  "enabledManagers": ["cargo", "custom.regex", "github-actions", "mise"],
   "minimumReleaseAge": "3 days",
+  "customManagers": [
+    {
+      "customType": "regex",
+      "description": "Update the S2 Lite image pulled by CI",
+      "managerFilePatterns": ["/^\\.github/workflows/ci\\.yml$/"],
+      "matchStrings": [
+        "docker pull (?<depName>ghcr\\.io/s2-streamstore/s2):(?<currentValue>\\S+)"
+      ],
+      "datasourceTemplate": "docker",
+      "versioningTemplate": "docker"
+    }
+  ],
   "packageRules": [
     {
       "description": ["Automerge non-major updates"],
