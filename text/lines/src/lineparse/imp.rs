@@ -40,9 +40,29 @@ enum FrameAction {
     NeedMore,
 }
 
+struct DelimiterSearch {
+    position: Option<usize>,
+    #[cfg(test)]
+    searched: std::ops::Range<usize>,
+}
+
+fn find_delimiter(data: &[u8], delimiter: &[u8], starting_offset: usize) -> DelimiterSearch {
+    let starting_offset = starting_offset.min(data.len());
+    let search_data = data.get(starting_offset..).unwrap_or_default();
+    let position = memchr::memmem::find(search_data, delimiter)
+        .map(|relative_position| starting_offset + relative_position);
+
+    DelimiterSearch {
+        position,
+        #[cfg(test)]
+        searched: starting_offset..data.len(),
+    }
+}
+
 #[derive(Default)]
 pub struct LineParse {
     settings: Mutex<Settings>,
+    scan_offset: Mutex<usize>,
 }
 
 impl LineParse {
@@ -50,6 +70,16 @@ impl LineParse {
         self.settings
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    fn scan_offset(&self) -> MutexGuard<'_, usize> {
+        self.scan_offset
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    fn reset_scan_offset(&self) {
+        *self.scan_offset() = 0;
     }
 
     fn format_error(&self, detail: &str) -> gst::FlowError {
@@ -102,7 +132,11 @@ impl LineParse {
         })?;
         let data = map.as_slice();
 
-        if let Some(record_len) = memchr::memmem::find(data, settings.delimiter.as_bytes()) {
+        let delimiter = settings.delimiter.as_bytes();
+        let starting_offset = (*self.scan_offset()).min(data.len());
+        let search = find_delimiter(data, delimiter, starting_offset);
+
+        if let Some(record_len) = search.position {
             if record_len > max_record_size {
                 return Err(self.format_error("record exceeds max-record-size"));
             }
@@ -121,6 +155,8 @@ impl LineParse {
                 .to_vec();
             return Ok(FrameAction::Finish { payload, consumed });
         }
+
+        *self.scan_offset() = data.len().saturating_sub(delimiter.len().saturating_sub(1));
 
         if draining {
             if data.is_empty() {
@@ -150,6 +186,59 @@ impl LineParse {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::find_delimiter;
+
+    #[test]
+    fn find_delimiter_reports_position_and_searched_range() {
+        let missing = find_delimiter(b"record", b"::", 2);
+        assert_eq!(missing.position, None);
+        assert_eq!(missing.searched, 2..6);
+
+        let at_start = find_delimiter(b"::record", b"::", 0);
+        assert_eq!(at_start.position, Some(0));
+        assert_eq!(at_start.searched, 0..8);
+
+        let overlapping = find_delimiter(b"record::", b"::", 6);
+        assert_eq!(overlapping.position, Some(6));
+        assert_eq!(overlapping.searched, 6..8);
+
+        let beyond_end = find_delimiter(b"record", b"::", usize::MAX);
+        assert_eq!(beyond_end.position, None);
+        assert_eq!(beyond_end.searched, 6..6);
+    }
+
+    #[test]
+    fn overlapping_search_work_is_linear_for_byte_fragmentation() {
+        let payload_len = 4_096;
+        let delimiter = b"::";
+        let mut framed = vec![b'a'; payload_len];
+        framed.extend_from_slice(delimiter);
+
+        let mut next_offset = 0;
+        let mut total_searched = 0;
+        let mut delimiter_position = None;
+        for fragment_end in 1..=framed.len() {
+            let search = find_delimiter(&framed[..fragment_end], delimiter, next_offset);
+            total_searched += search.searched.len();
+            if search.position.is_some() {
+                delimiter_position = search.position;
+                break;
+            }
+            next_offset = fragment_end.saturating_sub(delimiter.len().saturating_sub(1));
+        }
+
+        assert_eq!(delimiter_position, Some(payload_len));
+        assert_eq!(&framed[..payload_len], vec![b'a'; payload_len]);
+        assert!(
+            total_searched <= framed.len() * 2,
+            "searched {total_searched} bytes for {} input bytes",
+            framed.len()
+        );
+    }
+}
+
 #[glib::object_subclass]
 impl ObjectSubclass for LineParse {
     const NAME: &'static str = "GstSmithLineParse";
@@ -172,6 +261,7 @@ impl ObjectImpl for LineParse {
                     )
                     && let Some(parser) = parser.upgrade()
                 {
+                    parser.imp().reset_scan_offset();
                     parser.set_min_frame_size(1);
                 }
                 gst::PadProbeReturn::Ok
@@ -296,11 +386,13 @@ impl BaseParseImpl for LineParse {
         }
 
         let _lookahead = Self::checked_lookahead(&settings)?;
+        self.reset_scan_offset();
         self.obj().set_min_frame_size(1);
         Ok(())
     }
 
     fn stop(&self) -> Result<(), gst::ErrorMessage> {
+        self.reset_scan_offset();
         self.obj().set_min_frame_size(1);
         Ok(())
     }
@@ -345,6 +437,7 @@ impl BaseParseImpl for LineParse {
 
         match action {
             FrameAction::Finish { payload, consumed } => {
+                self.reset_scan_offset();
                 let mut output = gst::Buffer::from_mut_slice(payload);
                 let input = frame
                     .buffer()
@@ -365,6 +458,7 @@ impl BaseParseImpl for LineParse {
                 Ok((gst::FlowSuccess::Ok, 0))
             }
             FrameAction::Drop { consumed } => {
+                self.reset_scan_offset();
                 frame.set_flags(gst_base::BaseParseFrameFlags::DROP);
                 self.obj().set_min_frame_size(1);
                 self.obj().finish_frame(frame, consumed)?;

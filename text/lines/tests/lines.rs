@@ -194,6 +194,49 @@ fn lineparse_finds_multibyte_delimiter_across_buffer_boundaries() {
 }
 
 #[test]
+fn lineparse_finds_multibyte_delimiter_at_every_split_position() {
+    let delimiter = "<END>";
+    let framed = b"alpha<END>";
+
+    for split in 1..framed.len() {
+        let mut harness = parser_with_properties(&[("delimiter", &delimiter)]);
+        assert_eq!(
+            harness.push(buffer(&framed[..split])),
+            Ok(gst::FlowSuccess::Ok),
+            "first fragment failed at split {split}"
+        );
+        assert_eq!(
+            harness.push(buffer(&framed[split..])),
+            Ok(gst::FlowSuccess::Ok),
+            "second fragment failed at split {split}"
+        );
+        assert_eq!(
+            pull_bytes(&mut harness),
+            b"alpha",
+            "wrong record at split {split}"
+        );
+        assert_eq!(harness.buffers_in_queue(), 0);
+    }
+}
+
+#[test]
+fn lineparse_frames_long_record_fragmented_one_byte_at_a_time() {
+    let delimiter = "::";
+    let mut harness = parser_with_properties(&[("delimiter", &delimiter)]);
+    let payload = vec![b'a'; 4_096];
+
+    for &byte in &payload {
+        assert_eq!(harness.push(buffer(&[byte])), Ok(gst::FlowSuccess::Ok));
+    }
+    for &byte in delimiter.as_bytes() {
+        assert_eq!(harness.push(buffer(&[byte])), Ok(gst::FlowSuccess::Ok));
+    }
+
+    assert_eq!(pull_bytes(&mut harness), payload);
+    assert_eq!(harness.buffers_in_queue(), 0);
+}
+
+#[test]
 fn lineparse_emits_adjacent_empty_records_by_default() {
     let mut harness = parser();
     assert_eq!(harness.push(buffer(b"a\n\nb\n")), Ok(gst::FlowSuccess::Ok));
@@ -281,12 +324,16 @@ fn lineparse_preserves_binary_payload() {
 #[test]
 fn lineparse_flush_discards_incomplete_record() {
     let mut harness = parser();
-    assert_eq!(harness.push(buffer(b"stale")), Ok(gst::FlowSuccess::Ok));
+    assert_eq!(
+        harness.push(buffer(b"stale-without-a-delimiter")),
+        Ok(gst::FlowSuccess::Ok)
+    );
     assert!(harness.push_event(gst::event::FlushStart::new()));
     assert!(harness.push_event(gst::event::FlushStop::new(true)));
     let segment = gst::FormattedSegment::<gst::ClockTime>::new();
     assert!(harness.push_event(gst::event::Segment::new(&segment)));
-    assert_eq!(harness.push(buffer(b"new\n")), Ok(gst::FlowSuccess::Ok));
+    assert_eq!(harness.push(buffer(b"\nnew\n")), Ok(gst::FlowSuccess::Ok));
+    assert_eq!(pull_bytes(&mut harness), b"");
     assert_eq!(pull_bytes(&mut harness), b"new");
     assert_eq!(harness.buffers_in_queue(), 0);
 }
