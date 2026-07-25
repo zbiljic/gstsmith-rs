@@ -19,6 +19,9 @@ and elements written in Rust.
   - [`nats`](net/nats/): Core NATS byte-message transports.
     - `natssrc`: Subscribe to Core NATS subjects as one buffer per message.
     - `natssink`: Publish one buffer per Core NATS message.
+  - [`s2`](net/s2/): S2 durable-stream byte transports.
+    - `s2src`: Read one configured S2 stream as one buffer per record.
+    - `s2sink`: Append one buffer per S2 record with acknowledged shutdown.
 
 - [`text`](text/)
 

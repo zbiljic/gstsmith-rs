@@ -74,6 +74,17 @@ jobs:
           NATS_TEST_URL: nats://127.0.0.1:4222
         run: cargo test -p gst-plugin-nats --test nats_integration -- --ignored --test-threads=1
 
+      - name: Pull S2 Lite image
+        run: |
+          for attempt in 1 2 3; do
+            docker pull ghcr.io/s2-streamstore/s2:0.41.1 && break
+            if [ "$attempt" = 3 ]; then exit 1; fi
+            sleep 2
+          done
+
+      - name: Run S2 Lite integration tests
+        run: cargo test -p gst-plugin-s2 --test s2_lite -- --ignored --test-threads=1
+
       - name: Build plugins
         run: mise run build
 
@@ -91,3 +102,11 @@ jobs:
         env:
           GST_PLUGIN_PATH: ${{ github.workspace }}/target/debug
         run: gst-inspect-1.0 nats
+
+      - name: Inspect S2 plugin
+        env:
+          GST_PLUGIN_PATH: ${{ github.workspace }}/target/debug
+        run: |
+          gst-inspect-1.0 s2
+          gst-inspect-1.0 s2src
+          gst-inspect-1.0 s2sink
