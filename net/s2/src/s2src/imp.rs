@@ -118,6 +118,30 @@ impl S2Src {
             );
         }
     }
+
+    fn buffer_from_record(
+        &self,
+        record: &SequencedRecord,
+        basin: &str,
+        stream: &str,
+    ) -> Result<gst::Buffer, gst::FlowError> {
+        let mut buffer = gst::Buffer::from_mut_slice(record.body.to_vec());
+        meta::attach_record(
+            buffer.get_mut().ok_or(gst::FlowError::Error)?,
+            basin,
+            stream,
+            record,
+        )
+        .map_err(|error| {
+            gst::element_imp_error!(
+                self,
+                gst::StreamError::Format,
+                ["Failed to attach S2 record metadata: {error}"]
+            );
+            gst::FlowError::Error
+        })?;
+        Ok(buffer)
+    }
 }
 
 #[glib::object_subclass]
@@ -405,18 +429,12 @@ impl PushSrcImpl for S2Src {
         let (flushing, failure, posted) = {
             let mut state = self.state();
             let State::Started {
-                worker,
-                last_delivered,
-                flushing,
-                ..
+                worker, flushing, ..
             } = &mut *state
             else {
                 return Err(gst::FlowError::Flushing);
             };
             worker.receiver = Some(receiver);
-            if let Some(record) = record.as_ref() {
-                *last_delivered = Some(record.seq_num);
-            }
             (
                 *flushing,
                 worker
@@ -452,23 +470,45 @@ impl PushSrcImpl for S2Src {
             );
             gst::FlowError::Error
         })?;
-        let mut buffer = gst::Buffer::from_mut_slice(record.body.to_vec());
-        meta::attach_record(
-            buffer.get_mut().ok_or(gst::FlowError::Error)?,
-            basin,
-            stream,
-            &record,
-        )
-        .map_err(|error| {
-            gst::element_imp_error!(
-                self,
-                gst::StreamError::Format,
-                ["Failed to attach S2 record metadata: {error}"]
-            );
-            gst::FlowError::Error
-        })?;
+        let buffer = self.buffer_from_record(&record, basin, stream)?;
+        {
+            let mut state = self.state();
+            let State::Started {
+                worker,
+                last_delivered,
+                flushing,
+                ..
+            } = &mut *state
+            else {
+                return Err(gst::FlowError::Flushing);
+            };
+            commit_delivered_cursor(
+                Some(last_delivered),
+                *flushing,
+                &worker.cancel,
+                &cancel,
+                record.seq_num,
+            )?;
+        }
         Ok(CreateSuccess::NewBuffer(buffer))
     }
+}
+
+fn commit_delivered_cursor(
+    last_delivered: Option<&mut Option<u64>>,
+    flushing: bool,
+    worker_cancel: &CancellationToken,
+    create_cancel: &CancellationToken,
+    seq_num: u64,
+) -> Result<(), gst::FlowError> {
+    if flushing || worker_cancel != create_cancel || create_cancel.is_cancelled() {
+        return Err(gst::FlowError::Flushing);
+    }
+    let Some(last_delivered) = last_delivered else {
+        return Err(gst::FlowError::Flushing);
+    };
+    *last_delivered = Some(seq_num);
+    Ok(())
 }
 
 fn configured_start(settings: &Settings) -> ReadStart {
@@ -648,8 +688,53 @@ mod tests {
 
     #[test]
     fn sequence_resume_detects_exhaustion() {
-        assert_eq!(0_u64.checked_add(1), Some(1));
-        assert_eq!(u64::MAX.checked_add(1), None);
+        let cancel = CancellationToken::new();
+        let mut last_delivered = None;
+        commit_delivered_cursor(Some(&mut last_delivered), false, &cancel, &cancel, u64::MAX)
+            .expect("a maximum sequence number is a valid delivered cursor");
+        assert_eq!(last_delivered, Some(u64::MAX));
+        assert_eq!(
+            last_delivered.and_then(|seq_num| seq_num.checked_add(1)),
+            None
+        );
+    }
+
+    #[test]
+    fn delivery_resume_cursor_commits_only_for_active_attempts() {
+        let active = CancellationToken::new();
+        let mut last_delivered = Some(3);
+        commit_delivered_cursor(Some(&mut last_delivered), false, &active, &active, 4)
+            .expect("an active create attempt commits its delivered sequence");
+        assert_eq!(last_delivered, Some(4));
+
+        let flushing = CancellationToken::new();
+        assert_eq!(
+            commit_delivered_cursor(Some(&mut last_delivered), true, &flushing, &flushing, 5,),
+            Err(gst::FlowError::Flushing)
+        );
+        assert_eq!(last_delivered, Some(4));
+
+        let canceled = CancellationToken::new();
+        canceled.cancel();
+        assert_eq!(
+            commit_delivered_cursor(Some(&mut last_delivered), false, &canceled, &canceled, 5,),
+            Err(gst::FlowError::Flushing)
+        );
+        assert_eq!(last_delivered, Some(4));
+
+        let replacement = CancellationToken::new();
+        assert_eq!(
+            commit_delivered_cursor(Some(&mut last_delivered), false, &replacement, &active, 5,),
+            Err(gst::FlowError::Flushing)
+        );
+        assert_eq!(last_delivered, Some(4));
+
+        let stopped = CancellationToken::new();
+        assert_eq!(
+            commit_delivered_cursor(None, false, &stopped, &stopped, 5),
+            Err(gst::FlowError::Flushing)
+        );
+        assert_eq!(last_delivered, Some(4));
     }
 
     #[test]
