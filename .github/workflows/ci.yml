@@ -28,7 +28,7 @@ jobs:
     timeout-minutes: 20
     services:
       nats:
-        image: nats:2.12-alpine
+        image: nats:2.14-alpine
         ports:
           - 4222:4222
 
