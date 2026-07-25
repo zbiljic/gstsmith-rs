@@ -182,6 +182,14 @@ struct WorkerConfig {
     producer: ProducerConfig,
 }
 
+#[derive(Debug, Eq, PartialEq)]
+enum DrainOutcome {
+    Complete,
+    Flushing,
+    Timeout(String),
+    WorkerFailure(String),
+}
+
 #[derive(Default)]
 enum State {
     #[default]
@@ -228,13 +236,22 @@ impl S2Sink {
         gst::FlowError::Error
     }
 
-    fn drain(shared: &SharedQueue, timeout: Duration) -> Result<(), String> {
+    fn drain(shared: &SharedQueue, timeout: Duration) -> DrainOutcome {
+        Self::drain_with_wait_hook(shared, timeout, || {})
+    }
+
+    fn drain_with_wait_hook(
+        shared: &SharedQueue,
+        timeout: Duration,
+        wait_hook: impl FnOnce(),
+    ) -> DrainOutcome {
+        let mut wait_hook = Some(wait_hook);
         shared.close();
-        let deadline = Instant::now()
-            .checked_add(timeout)
-            .ok_or_else(|| "shutdown timeout cannot be represented".to_owned())?;
+        let Some(deadline) = Instant::now().checked_add(timeout) else {
+            return DrainOutcome::Timeout("shutdown timeout cannot be represented".to_owned());
+        };
         let mut state = shared.state();
-        while !state.done && state.failure.is_none() {
+        while !state.done && !state.flushing && state.failure.is_none() {
             let now = Instant::now();
             if now >= deadline {
                 drop(state);
@@ -242,9 +259,12 @@ impl S2Sink {
                 let detail =
                     "S2 sink shutdown timed out; accepted records may be unconfirmed".to_owned();
                 shared.store_failure(detail.clone());
-                return Err(detail);
+                return DrainOutcome::Timeout(detail);
             }
             let remaining = deadline.saturating_duration_since(now);
+            if let Some(wait_hook) = wait_hook.take() {
+                wait_hook();
+            }
             let waited = shared
                 .done
                 .wait_timeout(state, remaining)
@@ -252,11 +272,13 @@ impl S2Sink {
             state = waited.0;
         }
         if let Some(detail) = state.failure.as_ref() {
-            Err(detail.clone())
+            DrainOutcome::WorkerFailure(detail.clone())
         } else if state.done {
-            Ok(())
+            DrainOutcome::Complete
+        } else if state.flushing {
+            DrainOutcome::Flushing
         } else {
-            Err("S2 sink worker did not finish draining".to_owned())
+            DrainOutcome::WorkerFailure("S2 sink worker did not finish draining".to_owned())
         }
     }
 }
@@ -508,7 +530,9 @@ impl BaseSinkImpl for S2Sink {
                 worker.abort();
                 let _join_result = runtime.block_on(worker);
             }
-            if let Err(detail) = drain_result {
+            if let DrainOutcome::Timeout(detail) | DrainOutcome::WorkerFailure(detail) =
+                drain_result
+            {
                 return Err(gst::error_msg!(gst::ResourceError::Write, ["{detail}"]));
             }
         }
@@ -566,15 +590,18 @@ impl BaseSinkImpl for S2Sink {
                 };
                 (Arc::clone(shared), *shutdown_timeout)
             };
-            if let Err(detail) = Self::drain(&shared, timeout) {
-                if shared.claim_error_post() {
-                    gst::element_imp_error!(
-                        self,
-                        gst::ResourceError::Write,
-                        ["S2 sink EOS durability barrier failed: {detail}"]
-                    );
+            match Self::drain(&shared, timeout) {
+                DrainOutcome::Complete | DrainOutcome::Flushing => {}
+                DrainOutcome::Timeout(detail) | DrainOutcome::WorkerFailure(detail) => {
+                    if shared.claim_error_post() {
+                        gst::element_imp_error!(
+                            self,
+                            gst::ResourceError::Write,
+                            ["S2 sink EOS durability barrier failed: {detail}"]
+                        );
+                    }
+                    return false;
                 }
-                return false;
             }
         }
         self.parent_event(event)
@@ -582,8 +609,11 @@ impl BaseSinkImpl for S2Sink {
 
     fn unlock(&self) -> Result<(), gst::ErrorMessage> {
         if let State::Started { shared, .. } = &*self.state() {
-            shared.state().flushing = true;
+            let mut state = shared.state();
+            state.flushing = true;
+            drop(state);
             shared.capacity_available.notify_all();
+            shared.done.notify_all();
         }
         Ok(())
     }
@@ -793,8 +823,9 @@ mod tests {
     fn shutdown_timeout_is_bounded_and_marks_unconfirmed_failure() {
         let shared = SharedQueue::new(1);
         let started = Instant::now();
-        let error = S2Sink::drain(&shared, Duration::from_millis(10))
-            .expect_err("a worker that never finishes must time out");
+        let DrainOutcome::Timeout(error) = S2Sink::drain(&shared, Duration::from_millis(10)) else {
+            panic!("a worker that never finishes must time out");
+        };
         assert!(started.elapsed() < Duration::from_secs(1));
         assert!(error.contains("unconfirmed"));
         assert!(shared.cancel.is_cancelled());
@@ -804,6 +835,54 @@ mod tests {
                 .failure
                 .as_deref()
                 .is_some_and(|detail| detail.contains("timed out"))
+        );
+    }
+
+    #[test]
+    fn drain_wakes_for_flush_without_recording_a_failure() {
+        let shared = Arc::new(SharedQueue::new(1));
+        let wait_barrier = Arc::new(std::sync::Barrier::new(2));
+        let (result_tx, result_rx) = std::sync::mpsc::channel();
+        let thread_shared = Arc::clone(&shared);
+        let thread_barrier = Arc::clone(&wait_barrier);
+        let handle = std::thread::spawn(move || {
+            result_tx
+                .send(S2Sink::drain_with_wait_hook(
+                    &thread_shared,
+                    Duration::from_secs(5),
+                    move || {
+                        thread_barrier.wait();
+                    },
+                ))
+                .expect("reporting drain result");
+        });
+
+        wait_barrier.wait();
+        shared.state().flushing = true;
+        shared.done.notify_all();
+
+        let result = result_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("drain wakes for flush");
+        handle.join().expect("drain thread joins");
+        assert_eq!(result, DrainOutcome::Flushing);
+        assert!(shared.state().failure.is_none());
+        assert!(!shared.cancel.is_cancelled());
+        assert!(!shared.error_posted.load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn drain_reports_worker_failure_before_flush() {
+        let shared = SharedQueue::new(1);
+        {
+            let mut state = shared.state();
+            state.failure = Some("terminal ticket failure".to_owned());
+            state.flushing = true;
+        }
+
+        assert_eq!(
+            S2Sink::drain(&shared, Duration::from_secs(1)),
+            DrainOutcome::WorkerFailure("terminal ticket failure".to_owned())
         );
     }
 
