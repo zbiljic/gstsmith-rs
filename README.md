@@ -5,9 +5,9 @@ and elements written in Rust.
 
 ## Plugins
 
-- `generic`
+- [`generic`](generic/)
 
-  - `console`: Console I/O for UTF-8 text and JSON buffers.
+  - [`console`](generic/console/): Console I/O for UTF-8 text and JSON buffers.
     - `consolesrc`: Read buffers from standard input.
     - `consoleprint`: Write buffers to standard output or error and pass them
       downstream.
@@ -29,4 +29,4 @@ mise run pre-commit
 
 ## License
 
-Apache-2.0
+Licensed under the [Apache License 2.0](LICENSE).
