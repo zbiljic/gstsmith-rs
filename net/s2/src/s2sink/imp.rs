@@ -1,10 +1,11 @@
 use std::collections::VecDeque;
+use std::future::Future;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, LazyLock, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
+use futures_util::StreamExt;
 use futures_util::stream::FuturesUnordered;
-use futures_util::{FutureExt, StreamExt};
 use gst::glib;
 use gst::prelude::*;
 use gst::subclass::prelude::*;
@@ -109,7 +110,7 @@ impl SharedQueue {
         self.worker_wakeup.notify_one();
     }
 
-    fn fail(&self, detail: String) -> bool {
+    fn store_failure(&self, detail: String) {
         let mut state = self.state();
         if state.failure.is_none() {
             state.failure = Some(detail);
@@ -119,6 +120,9 @@ impl SharedQueue {
         self.capacity_available.notify_all();
         self.done.notify_all();
         self.worker_wakeup.notify_one();
+    }
+
+    fn claim_error_post(&self) -> bool {
         !self.error_posted.swap(true, Ordering::Relaxed)
     }
 
@@ -126,6 +130,50 @@ impl SharedQueue {
         self.state().done = true;
         self.capacity_available.notify_all();
         self.done.notify_all();
+    }
+}
+
+#[derive(Debug, Eq, PartialEq)]
+enum EnqueueError {
+    Flushing,
+    Terminal(String),
+    Closed,
+}
+
+fn enqueue_record(shared: &SharedQueue, record: AppendRecord) -> Result<(), EnqueueError> {
+    enqueue_record_with_wait_hook(shared, record, || {})
+}
+
+fn enqueue_record_with_wait_hook(
+    shared: &SharedQueue,
+    record: AppendRecord,
+    wait_hook: impl FnOnce(),
+) -> Result<(), EnqueueError> {
+    let mut wait_hook = Some(wait_hook);
+    let mut state = shared.state();
+    loop {
+        if state.flushing {
+            return Err(EnqueueError::Flushing);
+        }
+        if let Some(detail) = state.failure.as_ref() {
+            return Err(EnqueueError::Terminal(detail.clone()));
+        }
+        if !state.accepting {
+            return Err(EnqueueError::Closed);
+        }
+        if state.records.len() < shared.capacity {
+            state.records.push_back(record);
+            drop(state);
+            shared.worker_wakeup.notify_one();
+            return Ok(());
+        }
+        if let Some(wait_hook) = wait_hook.take() {
+            wait_hook();
+        }
+        state = shared
+            .capacity_available
+            .wait(state)
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
     }
 }
 
@@ -193,7 +241,7 @@ impl S2Sink {
                 shared.cancel.cancel();
                 let detail =
                     "S2 sink shutdown timed out; accepted records may be unconfirmed".to_owned();
-                shared.fail(detail.clone());
+                shared.store_failure(detail.clone());
                 return Err(detail);
             }
             let remaining = deadline.saturating_duration_since(now);
@@ -422,8 +470,10 @@ impl BaseSinkImpl for S2Sink {
             )
             .await;
             if let Err(detail) = result {
-                let should_post = worker_shared.fail(detail.clone());
-                if should_post && let Some(element) = weak.upgrade() {
+                worker_shared.store_failure(detail.clone());
+                if worker_shared.claim_error_post()
+                    && let Some(element) = weak.upgrade()
+                {
                     gst::element_error!(
                         element,
                         gst::ResourceError::Write,
@@ -495,27 +545,10 @@ impl BaseSinkImpl for S2Sink {
             };
             Arc::clone(shared)
         };
-        let mut state = shared.state();
-        loop {
-            if state.flushing {
-                return Err(gst::FlowError::Flushing);
-            }
-            if let Some(detail) = state.failure.as_ref() {
-                return Err(self.render_error(detail));
-            }
-            if !state.accepting {
-                return Err(gst::FlowError::Flushing);
-            }
-            if state.records.len() < shared.capacity {
-                state.records.push_back(record);
-                drop(state);
-                shared.worker_wakeup.notify_one();
-                return Ok(gst::FlowSuccess::Ok);
-            }
-            state = shared
-                .capacity_available
-                .wait(state)
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
+        match enqueue_record(&shared, record) {
+            Ok(()) => Ok(gst::FlowSuccess::Ok),
+            Err(EnqueueError::Flushing | EnqueueError::Closed) => Err(gst::FlowError::Flushing),
+            Err(EnqueueError::Terminal(_detail)) => Err(gst::FlowError::Error),
         }
     }
 
@@ -534,11 +567,13 @@ impl BaseSinkImpl for S2Sink {
                 (Arc::clone(shared), *shutdown_timeout)
             };
             if let Err(detail) = Self::drain(&shared, timeout) {
-                gst::element_imp_error!(
-                    self,
-                    gst::ResourceError::Write,
-                    ["S2 sink EOS durability barrier failed: {detail}"]
-                );
+                if shared.claim_error_post() {
+                    gst::element_imp_error!(
+                        self,
+                        gst::ResourceError::Write,
+                        ["S2 sink EOS durability barrier failed: {detail}"]
+                    );
+                }
                 return false;
             }
         }
@@ -580,18 +615,18 @@ async fn append_worker(config: WorkerConfig, shared: Arc<SharedQueue>) -> Result
             (record, accepting)
         };
         if let Some(record) = record {
-            let ticket = tokio::select! {
-                () = shared.cancel.cancelled() => {
-                    return Err("S2 sink worker was cancelled with unconfirmed records".to_owned());
-                }
-                result = producer.submit(record) => {
-                    result.map_err(|error| sanitized_error(&error))?
-                }
+            let submission = async {
+                producer
+                    .submit(record)
+                    .await
+                    .map_err(|error| sanitized_error(&error))
             };
+            let ticket =
+                submit_while_observing(submission, &mut tickets, &shared.cancel, |error| {
+                    sanitized_error(&error)
+                })
+                .await?;
             tickets.push(ticket);
-            if let Some(Some(result)) = tickets.next().now_or_never() {
-                result.map_err(|error| sanitized_error(&error))?;
-            }
             continue;
         }
         if !accepting {
@@ -633,8 +668,168 @@ async fn append_worker(config: WorkerConfig, shared: Arc<SharedQueue>) -> Result
     Ok(())
 }
 
+async fn submit_while_observing<T, F, A, E>(
+    submission: impl Future<Output = Result<T, String>>,
+    tickets: &mut FuturesUnordered<F>,
+    cancel: &CancellationToken,
+    map_ticket_error: impl Fn(E) -> String,
+) -> Result<T, String>
+where
+    F: Future<Output = Result<A, E>>,
+{
+    tokio::pin!(submission);
+    loop {
+        if tickets.is_empty() {
+            return tokio::select! {
+                () = cancel.cancelled() => {
+                    Err("S2 sink worker was cancelled with unconfirmed records".to_owned())
+                }
+                result = &mut submission => result,
+            };
+        }
+        tokio::select! {
+            biased;
+            () = cancel.cancelled() => {
+                return Err("S2 sink worker was cancelled with unconfirmed records".to_owned());
+            }
+            result = tickets.next() => {
+                if let Some(result) = result {
+                    result.map_err(&map_ticket_error)?;
+                }
+            }
+            result = &mut submission => return result,
+        }
+    }
+}
+
 fn set<T: Copy + for<'a> glib::value::FromValue<'a>>(slot: &mut T, value: &glib::Value) {
     if let Ok(new_value) = value.get::<T>() {
         *slot = new_value;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn record(value: u8) -> AppendRecord {
+        AppendRecord::new(vec![value]).expect("valid test record")
+    }
+
+    fn filled_queue() -> Arc<SharedQueue> {
+        let shared = Arc::new(SharedQueue::new(1));
+        shared.state().records.push_back(record(0));
+        shared
+    }
+
+    fn blocked_enqueue(
+        shared: &Arc<SharedQueue>,
+    ) -> (
+        std::sync::mpsc::Receiver<Result<(), EnqueueError>>,
+        std::thread::JoinHandle<()>,
+    ) {
+        let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+        let (result_tx, result_rx) = std::sync::mpsc::channel();
+        let thread_shared = Arc::clone(shared);
+        let handle = std::thread::spawn(move || {
+            result_tx
+                .send(enqueue_record_with_wait_hook(
+                    &thread_shared,
+                    record(1),
+                    move || ready_tx.send(()).expect("reporting blocked enqueue"),
+                ))
+                .expect("reporting enqueue result");
+        });
+        ready_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("enqueue thread starts");
+        (result_rx, handle)
+    }
+
+    fn assert_enqueue(
+        receiver: &std::sync::mpsc::Receiver<Result<(), EnqueueError>>,
+        handle: std::thread::JoinHandle<()>,
+        expected: &Result<(), EnqueueError>,
+    ) {
+        let result = receiver
+            .recv_timeout(Duration::from_secs(1))
+            .expect("blocked enqueue wakes");
+        handle.join().expect("enqueue thread joins");
+        assert_eq!(&result, expected);
+    }
+
+    #[test]
+    fn full_queue_wakes_for_capacity_flush_failure_and_close() {
+        let capacity = filled_queue();
+        let (receiver, handle) = blocked_enqueue(&capacity);
+        let _removed = capacity.state().records.pop_front();
+        capacity.capacity_available.notify_one();
+        assert_enqueue(&receiver, handle, &Ok(()));
+
+        let flushing = filled_queue();
+        let (receiver, handle) = blocked_enqueue(&flushing);
+        flushing.state().flushing = true;
+        flushing.capacity_available.notify_all();
+        assert_enqueue(&receiver, handle, &Err(EnqueueError::Flushing));
+
+        let failed = filled_queue();
+        let (receiver, handle) = blocked_enqueue(&failed);
+        failed.store_failure("terminal ticket failure".to_owned());
+        assert_enqueue(
+            &receiver,
+            handle,
+            &Err(EnqueueError::Terminal("terminal ticket failure".to_owned())),
+        );
+        assert!(failed.claim_error_post());
+        assert!(!failed.claim_error_post());
+
+        let closed = filled_queue();
+        let (receiver, handle) = blocked_enqueue(&closed);
+        closed.close();
+        assert_enqueue(&receiver, handle, &Err(EnqueueError::Closed));
+    }
+
+    #[test]
+    fn shutdown_timeout_is_bounded_and_marks_unconfirmed_failure() {
+        let shared = SharedQueue::new(1);
+        let started = Instant::now();
+        let error = S2Sink::drain(&shared, Duration::from_millis(10))
+            .expect_err("a worker that never finishes must time out");
+        assert!(started.elapsed() < Duration::from_secs(1));
+        assert!(error.contains("unconfirmed"));
+        assert!(shared.cancel.is_cancelled());
+        assert!(
+            shared
+                .state()
+                .failure
+                .as_deref()
+                .is_some_and(|detail| detail.contains("timed out"))
+        );
+    }
+
+    #[test]
+    fn ready_ticket_failure_preempts_another_submission() {
+        let mut tickets = FuturesUnordered::new();
+        tickets.push(std::future::ready(Err::<(), _>(
+            "terminal acknowledgement failure".to_owned(),
+        )));
+        let submission_polled = Arc::new(AtomicBool::new(false));
+        let submission_flag = Arc::clone(&submission_polled);
+        let submission = async move {
+            submission_flag.store(true, Ordering::Relaxed);
+            Ok::<_, String>(())
+        };
+        let cancel = CancellationToken::new();
+        let error = runtime::runtime()
+            .expect("test runtime")
+            .block_on(submit_while_observing(
+                submission,
+                &mut tickets,
+                &cancel,
+                std::convert::identity,
+            ))
+            .expect_err("ready acknowledgement failure is terminal");
+        assert_eq!(error, "terminal acknowledgement failure");
+        assert!(!submission_polled.load(Ordering::Relaxed));
     }
 }

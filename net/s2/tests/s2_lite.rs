@@ -117,6 +117,38 @@ fn body(buffer: &gst::Buffer) -> Vec<u8> {
         .to_vec()
 }
 
+fn headers(buffer: &gst::Buffer) -> Vec<(Vec<u8>, Vec<u8>)> {
+    let meta =
+        gst::meta::CustomMeta::from_buffer(buffer, "GstS2RecordMeta").expect("S2 record metadata");
+    meta.structure()
+        .get::<gst::Array>("headers")
+        .expect("S2 record headers")
+        .iter()
+        .map(|value| {
+            let structure = value.get::<gst::Structure>().expect("S2 header structure");
+            assert_eq!(structure.name(), "s2-header");
+            let name = structure
+                .get::<gst::glib::Bytes>("name")
+                .expect("S2 header name");
+            let value = structure
+                .get::<gst::glib::Bytes>("value")
+                .expect("S2 header value");
+            (name.as_ref().to_vec(), value.as_ref().to_vec())
+        })
+        .collect()
+}
+
+fn sink_harness(element: &gst::Element, stream_id: &str) -> gst_check::Harness {
+    let mut harness = gst_check::Harness::with_element(element, Some("sink"), None);
+    harness.play();
+    assert!(harness.push_event(gst::event::StreamStart::new(stream_id)));
+    let caps = gst::Caps::builder("application/octet-stream").build();
+    assert!(harness.push_event(gst::event::Caps::new(&caps)));
+    let segment = gst::FormattedSegment::<gst::ClockTime>::new();
+    assert!(harness.push_event(gst::event::Segment::new(&segment)));
+    harness
+}
+
 fn stop_lite(runtime: &tokio::runtime::Runtime, lite: S2Lite) {
     runtime.block_on(async move {
         drop(lite);
@@ -167,17 +199,15 @@ fn sink_source_round_trip_durability_metadata_and_command_rejection() {
     let sink = common::element("s2sink");
     configure(&sink, &lite, &basin_name, &stream_name, &token);
     sink.set_property("preserve-timestamp", true);
-    let mut sink_harness = gst_check::Harness::with_element(&sink, Some("sink"), None);
-    sink_harness.set_src_caps_str("application/octet-stream");
-    sink_harness.play();
-    sink_harness
+    let mut input_harness = sink_harness(&sink, "roundtrip-input");
+    input_harness
         .push(meta_buffer(vec![0, 255, 17, 0], 123))
         .expect("pushing metadata-bearing binary record");
-    sink_harness
+    input_harness
         .push(gst::Buffer::from_mut_slice(Vec::<u8>::new()))
         .expect("pushing empty record");
     assert!(
-        sink_harness.push_event(gst::event::Eos::new()),
+        input_harness.push_event(gst::event::Eos::new()),
         "EOS waits for durable acknowledgements"
     );
 
@@ -298,10 +328,20 @@ fn sink_source_round_trip_durability_metadata_and_command_rejection() {
     assert_eq!(
         first_meta
             .structure()
-            .get::<gst::Array>("headers")
-            .expect("source headers")
-            .len(),
-        2
+            .get::<String>("basin")
+            .expect("source basin"),
+        basin_name.as_ref()
+    );
+    assert_eq!(
+        first_meta
+            .structure()
+            .get::<String>("stream")
+            .expect("source stream"),
+        stream_name.as_ref()
+    );
+    assert_eq!(
+        headers(&first),
+        vec![(vec![0, 255], vec![1, 0]), (vec![0, 255], Vec::new())]
     );
     let command_meta = gst::meta::CustomMeta::from_buffer(&command_buffer, "GstS2RecordMeta")
         .expect("command metadata");
@@ -310,6 +350,11 @@ fn sink_source_round_trip_durability_metadata_and_command_rejection() {
             .structure()
             .get::<bool>("is-command")
             .expect("command marker")
+    );
+    assert_eq!(body(&command_buffer), b"integration-fence");
+    assert_eq!(
+        headers(&command_buffer),
+        vec![(Vec::new(), b"fence".to_vec())]
     );
 
     let (destination_basin, destination_stream) = unique_names("destination");
@@ -323,6 +368,41 @@ fn sink_source_round_trip_durability_metadata_and_command_rejection() {
                 .ensure_stream(EnsureStreamInput::new(destination_stream.clone())),
         )
         .expect("ensuring destination stream");
+    let relay_sink = common::element("s2sink");
+    configure(
+        &relay_sink,
+        &lite,
+        &destination_basin,
+        &destination_stream,
+        &token,
+    );
+    let mut relay_harness = sink_harness(&relay_sink, "relay-input");
+    relay_harness
+        .push(first.copy())
+        .expect("relaying source buffer to property-selected destination");
+    assert!(
+        relay_harness.push_event(gst::event::Eos::new()),
+        "relay EOS waits for durable acknowledgement"
+    );
+    let relayed = runtime
+        .block_on(
+            client
+                .basin(destination_basin.clone())
+                .stream(destination_stream.clone())
+                .read(
+                    ReadInput::new()
+                        .with_stop(ReadStop::new().with_limits(ReadLimits::new().with_count(1))),
+                ),
+        )
+        .expect("reading relayed destination record");
+    let relayed = relayed.records.first().expect("relayed destination record");
+    assert_eq!(relayed.body.as_ref(), &[0, 255, 17, 0]);
+    assert_eq!(relayed.headers.len(), 2);
+    assert_eq!(relayed.headers[0].name.as_ref(), &[0, 255]);
+    assert_eq!(relayed.headers[0].value.as_ref(), &[1, 0]);
+    assert_eq!(relayed.headers[1].name.as_ref(), &[0, 255]);
+    assert!(relayed.headers[1].value.is_empty());
+
     let command_sink = common::element("s2sink");
     configure(
         &command_sink,
@@ -331,8 +411,7 @@ fn sink_source_round_trip_durability_metadata_and_command_rejection() {
         &destination_stream,
         &token,
     );
-    let mut command_harness = gst_check::Harness::with_element(&command_sink, Some("sink"), None);
-    command_harness.play();
+    let mut command_harness = sink_harness(&command_sink, "command-rejection-input");
     assert!(
         command_harness.push(command_buffer).is_err(),
         "s2sink rejects command metadata before append"
@@ -353,9 +432,49 @@ fn sink_source_round_trip_durability_metadata_and_command_rejection() {
     );
 
     drop(command_harness);
+    drop(relay_harness);
     drop(source_harness);
-    drop(sink_harness);
+    drop(input_harness);
     std::fs::remove_file(token).expect("removing test token file");
+    stop_lite(&runtime, lite);
+}
+
+#[test]
+#[ignore = "requires Docker and the pinned S2 Lite image"]
+fn normal_stop_drains_accepted_records() {
+    common::init();
+    let runtime = runtime();
+    let lite = runtime.block_on(S2Lite::start()).expect("starting S2 Lite");
+    let client = lite.client().expect("S2 Lite client");
+    let (basin_name, stream_name) = unique_names("normal-stop");
+    ensure_stream(&runtime, &client, &basin_name, &stream_name);
+    let token = token_file("normal-stop");
+
+    let sink = common::element("s2sink");
+    configure(&sink, &lite, &basin_name, &stream_name, &token);
+    let mut harness = sink_harness(&sink, "normal-stop-input");
+    harness
+        .push(gst::Buffer::from_mut_slice(vec![0, 1, 0, 255]))
+        .expect("accepting record before normal stop");
+    sink.set_state(gst::State::Null)
+        .expect("normal sink shutdown");
+
+    let records = runtime
+        .block_on(
+            client
+                .basin(basin_name.clone())
+                .stream(stream_name.clone())
+                .read(
+                    ReadInput::new()
+                        .with_stop(ReadStop::new().with_limits(ReadLimits::new().with_count(1))),
+                ),
+        )
+        .expect("reading record drained during normal stop");
+    assert_eq!(records.records.len(), 1);
+    assert_eq!(records.records[0].body.as_ref(), &[0, 1, 0, 255]);
+
+    drop(harness);
+    std::fs::remove_file(token).expect("removing access-token file");
     stop_lite(&runtime, lite);
 }
 
@@ -440,8 +559,7 @@ fn append_precondition_failures_are_terminal() {
     configure(&match_sink, &lite, &match_basin, &match_stream, &token);
     match_sink.set_property("match-seq-num-enabled", true);
     match_sink.set_property("match-seq-num", 99_u64);
-    let mut match_harness = gst_check::Harness::with_element(&match_sink, Some("sink"), None);
-    match_harness.play();
+    let mut match_harness = sink_harness(&match_sink, "match-failure-input");
     match_harness
         .push(gst::Buffer::from_mut_slice(vec![1]))
         .expect("locally queueing match-sequence test record");
@@ -462,8 +580,7 @@ fn append_precondition_failures_are_terminal() {
         "fencing-token-file",
         fencing_path.to_string_lossy().as_ref(),
     );
-    let mut fence_harness = gst_check::Harness::with_element(&fence_sink, Some("sink"), None);
-    fence_harness.play();
+    let mut fence_harness = sink_harness(&fence_sink, "fence-failure-input");
     fence_harness
         .push(gst::Buffer::from_mut_slice(vec![2]))
         .expect("locally queueing fencing test record");

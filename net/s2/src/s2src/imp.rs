@@ -292,12 +292,12 @@ impl BaseSrcImpl for S2Src {
             start,
             ignore_command_records: settings.ignore_command_records,
         };
-        let worker = spawn_worker(&config, self.obj().downgrade()).map_err(Self::settings_error)?;
         if let Some(caps) = settings.caps.as_ref() {
             self.obj()
                 .set_caps(caps)
                 .map_err(|error| Self::settings_error(format!("failed to set caps: {error}")))?;
         }
+        let worker = spawn_worker(&config, self.obj().downgrade()).map_err(Self::settings_error)?;
         *self.state() = State::Started {
             worker,
             config: Box::new(config),
