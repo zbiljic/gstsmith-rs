@@ -21,6 +21,7 @@ gst-base = { workspace = true }
 s2-sdk = { version = "=0.32.1", default-features = false, features = ["rustls-ring"] }
 tokio = { version = "1.49", features = ["rt-multi-thread", "sync", "time"] }
 tokio-util = "0.7"
+url = "2.5"
 
 [build-dependencies]
 gst-plugin-version-helper = { workspace = true }

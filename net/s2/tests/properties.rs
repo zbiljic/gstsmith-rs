@@ -11,6 +11,7 @@ fn assert_shared_defaults(element: &gst::Element) {
     );
     assert_eq!(element.property::<Option<String>>("account-endpoint"), None);
     assert_eq!(element.property::<Option<String>>("basin-endpoint"), None);
+    assert!(!element.property::<bool>("allow-insecure-endpoints"));
     assert_eq!(element.property::<u64>("connection-timeout"), 3_000_000_000);
     assert_eq!(element.property::<u64>("request-timeout"), 5_000_000_000);
     assert_eq!(element.property::<u32>("retry-max-attempts"), 3);
@@ -60,6 +61,7 @@ fn properties_round_trip_and_are_ready_mutable() {
         element.set_property("stream", "test-stream");
         element.set_property("queue-capacity", 7_u32);
         element.set_property("connection-timeout", 17_u64);
+        element.set_property("allow-insecure-endpoints", true);
         assert_eq!(
             element.property::<Option<String>>("basin").as_deref(),
             Some("test-basin")
@@ -70,12 +72,14 @@ fn properties_round_trip_and_are_ready_mutable() {
         );
         assert_eq!(element.property::<u32>("queue-capacity"), 7);
         assert_eq!(element.property::<u64>("connection-timeout"), 17);
+        assert!(element.property::<bool>("allow-insecure-endpoints"));
         let shared = [
             "basin",
             "stream",
             "access-token-file",
             "account-endpoint",
             "basin-endpoint",
+            "allow-insecure-endpoints",
             "connection-timeout",
             "request-timeout",
             "retry-max-attempts",

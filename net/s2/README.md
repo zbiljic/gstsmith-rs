@@ -46,7 +46,12 @@ gst-launch-1.0 fakesrc num-buffers=1 filltype=zero sizetype=fixed sizemax=16 ! \
 ```
 
 The two endpoints must be configured together, use the same scheme, and
-contain no user-info. TLS certificate verification cannot be disabled.
+contain no user-info. HTTP is accepted without additional configuration only
+for loopback S2 Lite endpoints (`localhost`, IPv4 loopback, or `::1`). Remote
+plaintext HTTP endpoints are rejected by default because they expose
+credentials and data. Set `allow-insecure-endpoints=true` only for controlled
+test networks; it is strongly discouraged elsewhere. TLS certificate
+verification cannot be disabled.
 
 ## Record metadata
 
@@ -81,8 +86,9 @@ follows the official SDK.
 ## Important properties
 
 Shared properties include `basin`, `stream`, `access-token-file`,
-`account-endpoint`, `basin-endpoint`, connection/request timeouts, retry
-attempts and delays, `compression`, and `queue-capacity`.
+`account-endpoint`, `basin-endpoint`, `allow-insecure-endpoints`,
+connection/request timeouts, retry attempts and delays, `compression`, and
+`queue-capacity`.
 
 Source start controls are `start-mode`, `start-seq-num`, `start-timestamp`,
 `tail-offset`, `clamp-to-tail`, and `ignore-command-records`. `caps` optionally

@@ -9,6 +9,7 @@ use s2_sdk::types::{
     AccountEndpoint, AppendRetryPolicy, BasinEndpoint, BasinName, Compression, FencingToken,
     RetryConfig, S2Config, S2Endpoints, StreamName,
 };
+use url::{Host, Url};
 
 pub const DEFAULT_CONNECTION_TIMEOUT: u64 = 3_000_000_000;
 pub const DEFAULT_REQUEST_TIMEOUT: u64 = 5_000_000_000;
@@ -65,6 +66,7 @@ pub struct ConnectionSettings {
     pub access_token_file: Option<String>,
     pub account_endpoint: Option<String>,
     pub basin_endpoint: Option<String>,
+    pub allow_insecure_endpoints: bool,
     pub connection_timeout: u64,
     pub request_timeout: u64,
     pub retry_max_attempts: u32,
@@ -82,6 +84,7 @@ impl Default for ConnectionSettings {
             access_token_file: None,
             account_endpoint: None,
             basin_endpoint: None,
+            allow_insecure_endpoints: false,
             connection_timeout: DEFAULT_CONNECTION_TIMEOUT,
             request_timeout: DEFAULT_REQUEST_TIMEOUT,
             retry_max_attempts: DEFAULT_RETRY_MAX_ATTEMPTS,
@@ -127,6 +130,12 @@ impl ConnectionSettings {
             glib::ParamSpecString::builder("basin-endpoint")
                 .nick("Basin Endpoint")
                 .blurb("Optional explicit S2 basin endpoint")
+                .mutable_ready()
+                .build(),
+            glib::ParamSpecBoolean::builder("allow-insecure-endpoints")
+                .nick("Allow Insecure Endpoints")
+                .blurb("Allow credentials and data over remote plaintext HTTP endpoints")
+                .default_value(false)
                 .mutable_ready()
                 .build(),
             glib::ParamSpecUInt64::builder("connection-timeout")
@@ -185,6 +194,7 @@ impl ConnectionSettings {
             "access-token-file" => set_optional_string(&mut self.access_token_file, value),
             "account-endpoint" => set_optional_string(&mut self.account_endpoint, value),
             "basin-endpoint" => set_optional_string(&mut self.basin_endpoint, value),
+            "allow-insecure-endpoints" => set_copy(&mut self.allow_insecure_endpoints, value),
             "connection-timeout" => set_copy(&mut self.connection_timeout, value),
             "request-timeout" => set_copy(&mut self.request_timeout, value),
             "retry-max-attempts" => set_copy(&mut self.retry_max_attempts, value),
@@ -203,6 +213,7 @@ impl ConnectionSettings {
             "access-token-file" => Some(self.access_token_file.to_value()),
             "account-endpoint" => Some(self.account_endpoint.to_value()),
             "basin-endpoint" => Some(self.basin_endpoint.to_value()),
+            "allow-insecure-endpoints" => Some(self.allow_insecure_endpoints.to_value()),
             "connection-timeout" => Some(self.connection_timeout.to_value()),
             "request-timeout" => Some(self.request_timeout.to_value()),
             "retry-max-attempts" => Some(self.retry_max_attempts.to_value()),
@@ -262,17 +273,11 @@ impl ConnectionSettings {
         ) {
             (None, None) => {}
             (Some(account), Some(basin_endpoint)) => {
-                reject_endpoint_user_info(account)?;
-                reject_endpoint_user_info(basin_endpoint)?;
-                let account = AccountEndpoint::new(account)
-                    .map_err(|_parse_error| "account-endpoint is invalid".to_owned())?;
-                let basin_endpoint = BasinEndpoint::new(basin_endpoint)
-                    .map_err(|_parse_error| "basin-endpoint is invalid".to_owned())?;
-                let endpoints =
-                    S2Endpoints::new(account, basin_endpoint).map_err(|_parse_error| {
-                        "account-endpoint and basin-endpoint schemes must match".to_owned()
-                    })?;
-                s2 = s2.with_endpoints(endpoints);
+                s2 = s2.with_endpoints(validate_endpoints(
+                    account,
+                    basin_endpoint,
+                    self.allow_insecure_endpoints,
+                )?);
             }
             _ => {
                 return Err("account-endpoint and basin-endpoint must be set together".to_owned());
@@ -304,14 +309,54 @@ fn set_copy<T: Copy + for<'a> glib::value::FromValue<'a>>(
     true
 }
 
-fn reject_endpoint_user_info(endpoint: &str) -> Result<(), String> {
-    let authority = endpoint
-        .split_once("://")
-        .map_or(endpoint, |(_, authority)| authority);
-    if authority.contains('@') {
+fn validate_endpoints(
+    account: &str,
+    basin: &str,
+    allow_insecure_endpoints: bool,
+) -> Result<S2Endpoints, String> {
+    validate_endpoint_policy(account, allow_insecure_endpoints)?;
+    validate_endpoint_policy(basin, allow_insecure_endpoints)?;
+    let account = AccountEndpoint::new(account)
+        .map_err(|_parse_error| "account-endpoint is invalid".to_owned())?;
+    let basin =
+        BasinEndpoint::new(basin).map_err(|_parse_error| "basin-endpoint is invalid".to_owned())?;
+    S2Endpoints::new(account, basin)
+        .map_err(|_parse_error| "account-endpoint and basin-endpoint schemes must match".to_owned())
+}
+
+fn validate_endpoint_policy(endpoint: &str, allow_insecure_endpoints: bool) -> Result<(), String> {
+    let endpoint = parse_endpoint(endpoint)?;
+    if !endpoint.username().is_empty() || endpoint.password().is_some() {
         Err("endpoint user-info is not permitted".to_owned())
-    } else {
+    } else if endpoint.scheme() == "https"
+        || (endpoint.scheme() == "http"
+            && (allow_insecure_endpoints || is_loopback_s2_lite_endpoint(&endpoint)))
+    {
         Ok(())
+    } else {
+        Err(
+            "endpoint must use HTTPS, or HTTP for a loopback S2 Lite endpoint; set allow-insecure-endpoints=true to permit remote plaintext HTTP"
+                .to_owned(),
+        )
+    }
+}
+
+fn parse_endpoint(endpoint: &str) -> Result<Url, String> {
+    let endpoint = endpoint.replace("{basin}.", "placeholder.");
+    match Url::parse(&endpoint) {
+        Ok(endpoint) => Ok(endpoint),
+        Err(url::ParseError::RelativeUrlWithoutBase) => Url::parse(&format!("https://{endpoint}"))
+            .map_err(|_parse_error| "endpoint is invalid".to_owned()),
+        Err(_parse_error) => Err("endpoint is invalid".to_owned()),
+    }
+}
+
+fn is_loopback_s2_lite_endpoint(endpoint: &Url) -> bool {
+    match endpoint.host() {
+        Some(Host::Domain(host)) => host == "localhost",
+        Some(Host::Ipv4(address)) => address.is_loopback(),
+        Some(Host::Ipv6(address)) => address.is_loopback(),
+        None => false,
     }
 }
 
@@ -430,8 +475,46 @@ mod tests {
     }
 
     #[test]
-    fn endpoint_user_info_is_rejected() {
-        assert!(reject_endpoint_user_info("https://user@example.test").is_err());
-        reject_endpoint_user_info("http://example.test").expect("plain endpoint is accepted");
+    fn endpoint_policy_accepts_https_and_s2_lite_loopback_http() {
+        for endpoint in [
+            "https://example.test",
+            "example.test",
+            "https://{basin}.example.test",
+            "http://127.0.0.1:8080",
+            "http://127.1.2.3:8080",
+            "http://[::1]:8080",
+            "http://localhost:8080",
+        ] {
+            validate_endpoint_policy(endpoint, false)
+                .unwrap_or_else(|error| panic!("{endpoint} should be accepted: {error}"));
+        }
+    }
+
+    #[test]
+    fn endpoint_policy_requires_opt_in_for_remote_plaintext_http() {
+        let error = validate_endpoint_policy("http://example.test", false)
+            .expect_err("remote plaintext HTTP must be rejected by default");
+        assert!(error.contains("allow-insecure-endpoints=true"));
+        validate_endpoint_policy("http://example.test", true)
+            .expect("explicit opt-in accepts remote plaintext HTTP");
+    }
+
+    #[test]
+    fn endpoint_policy_rejects_user_info_without_echoing_it() {
+        let user_info = "SENTINEL_ENDPOINT_USER_INFO";
+        let error = validate_endpoint_policy(&format!("https://{user_info}@example.test"), false)
+            .expect_err("endpoint user-info must be rejected");
+        assert_eq!(error, "endpoint user-info is not permitted");
+        assert!(!error.contains(user_info));
+    }
+
+    #[test]
+    fn endpoint_pair_rejects_mixed_schemes() {
+        let error = validate_endpoints("https://example.test", "http://127.0.0.1", false)
+            .expect_err("the SDK contract rejects mixed endpoint schemes");
+        assert_eq!(
+            error,
+            "account-endpoint and basin-endpoint schemes must match"
+        );
     }
 }
