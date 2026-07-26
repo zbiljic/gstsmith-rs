@@ -11,6 +11,19 @@ across active members of the same group. JetStream persistence,
 acknowledgements, redelivery, and automatic request/reply responses are
 deliberately outside this plugin.
 
+## Integration tests
+
+The normal `mise run pre-commit` gate is offline/local and does not start a
+broker. To run this crate's ignored integration suite, start a reachable Core
+NATS server and run:
+
+```sh
+mise run test:integration:nats
+```
+
+The task defaults `NATS_TEST_URL` to `nats://127.0.0.1:4222`; set that
+environment variable before invoking it to test another endpoint.
+
 ## Examples
 
 Publish bytes:

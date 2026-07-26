@@ -11,6 +11,20 @@ This crate provides native, single-stream transports for
 Both pads advertise `ANY`. Empty and non-UTF-8 record bodies are preserved.
 The elements do not create basins or streams.
 
+## Integration tests
+
+The normal `mise run pre-commit` gate is offline/local and does not require
+Docker. To run this crate's ignored S2 Lite integration suite, ensure a
+working Docker daemon is available and run:
+
+```sh
+mise run test:integration:s2
+```
+
+The task pulls the pinned S2 Lite image with bounded retries before starting
+the serial test binary. `mise run test:integration` requires both Docker and a
+reachable Core NATS server.
+
 ## Authentication and endpoints
 
 Set `basin` and `stream` on each element. By default, credentials come from

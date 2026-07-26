@@ -23,6 +23,10 @@ description = "Run tests"
 alias = "t"
 depends = ["*:test"]
 
+[tasks."test:integration"]
+description = "Run all service-dependent integration tests (requires NATS and Docker)"
+depends = ["test:integration:nats", "test:integration:s2"]
+
 [tasks."pre-commit"]
 description = "Run the full local development gate"
 alias = "prk"

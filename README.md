@@ -51,11 +51,21 @@ does not need another build command when a plugin is added.
 
 ## Development
 
-Run the complete workspace validation before submitting a change:
+Run the complete offline/local validation gate before submitting a change:
 
 ```sh
 mise run pre-commit
 ```
+
+The gate above does not start external services. Service-dependent integration
+suites are opt-in:
+
+```sh
+mise run test:integration
+```
+
+The composite task runs every integration suite. See each plugin's README for
+its individual task, prerequisites, and environment configuration.
 
 For a faster iteration loop, target one plugin by its Cargo package name:
 

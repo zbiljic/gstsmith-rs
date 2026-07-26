@@ -1,0 +1,20 @@
+#!/usr/bin/env bash
+#MISE description="Run S2 Lite integration tests (requires a working Docker daemon)"
+
+set -euo pipefail
+
+if ! docker info >/dev/null 2>&1; then
+  echo "Docker is unavailable. Start Docker before running the S2 Lite integration tests."
+  exit 1
+fi
+
+for attempt in 1 2 3; do
+  docker pull ghcr.io/s2-streamstore/s2:0.41.1 && break
+  if [ "$attempt" = 3 ]; then
+    echo "Could not pull the pinned S2 Lite image after three attempts."
+    exit 1
+  fi
+  sleep 2
+done
+
+cargo test -p gst-plugin-s2 --test s2_lite -- --ignored --test-threads=1

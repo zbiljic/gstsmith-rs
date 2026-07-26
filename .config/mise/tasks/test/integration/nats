@@ -1,0 +1,70 @@
+#!/usr/bin/env bash
+#MISE description="Run Core NATS integration tests (requires a reachable NATS server)"
+
+set -euo pipefail
+
+test_url="${NATS_TEST_URL:-nats://127.0.0.1:4222}"
+export NATS_TEST_URL="$test_url"
+
+case "$test_url" in
+  nats://*) ;;
+  *)
+    echo "NATS_TEST_URL must use the nats:// scheme."
+    exit 1
+    ;;
+esac
+
+authority="${test_url#nats://}"
+authority="${authority%%/*}"
+host="${authority%:*}"
+port="${authority##*:}"
+
+if [ -z "$host" ] || [ -z "$port" ] || [ "$host" = "$port" ]; then
+  echo "NATS_TEST_URL must include a host and port."
+  exit 1
+fi
+
+probe_dir="$(mktemp -d)"
+probe="$probe_dir/nats-tcp-probe"
+trap 'rm -rf "$probe_dir"' EXIT
+
+if ! rustc -o "$probe" - <<'RUST'
+use std::{
+    env,
+    net::{TcpStream, ToSocketAddrs},
+    process::ExitCode,
+    time::Duration,
+};
+
+fn main() -> ExitCode {
+    let Some(target) = env::args().nth(1) else {
+        return ExitCode::from(2);
+    };
+    let Ok(addresses) = target.to_socket_addrs() else {
+        return ExitCode::from(1);
+    };
+
+    for address in addresses {
+        if TcpStream::connect_timeout(&address, Duration::from_secs(1)).is_ok() {
+            return ExitCode::SUCCESS;
+        }
+    }
+
+    ExitCode::from(1)
+}
+RUST
+then
+  echo "Could not build the NATS TCP preflight. Ensure the Rust toolchain is available."
+  exit 1
+fi
+
+for attempt in 1 2 3; do
+  "$probe" "$host:$port" && break
+  if [ "$attempt" = 3 ]; then
+    echo "Core NATS is unreachable. Start a server and set NATS_TEST_URL (default: nats://127.0.0.1:4222)."
+    exit 1
+  fi
+  sleep 2
+done
+
+cargo test -p gst-plugin-nats --test nats_integration -- --ignored --test-threads=1
