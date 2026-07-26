@@ -33,11 +33,14 @@ file and set `access-token-file`; its value takes precedence over the
 environment. Tokens and fencing values are intentionally not GObject
 properties because properties are introspectable.
 
+These examples assume `mise run build` has completed from the repository root.
+
 Cloud sink example:
 
 ```sh
 S2_ACCESS_TOKEN='...' \
-  gst-launch-1.0 filesrc location=input.bin ! \
+  GST_PLUGIN_PATH="$PWD/target/debug" gst-launch-1.0 \
+  filesrc location=input.bin ! \
   s2sink basin=my-basin stream=media
 ```
 
@@ -45,14 +48,16 @@ Cloud source example:
 
 ```sh
 S2_ACCESS_TOKEN='...' \
-  gst-launch-1.0 s2src basin=my-basin stream=media \
+  GST_PLUGIN_PATH="$PWD/target/debug" gst-launch-1.0 \
+  s2src basin=my-basin stream=media \
     start-mode=sequence start-seq-num=0 ! filesink location=output.bin
 ```
 
 For S2 Lite, set both endpoint properties to the same HTTP endpoint:
 
 ```sh
-gst-launch-1.0 fakesrc num-buffers=1 filltype=zero sizetype=fixed sizemax=16 ! \
+GST_PLUGIN_PATH="$PWD/target/debug" gst-launch-1.0 \
+  fakesrc num-buffers=1 filltype=zero sizetype=fixed sizemax=16 ! \
   s2sink basin=test-basin stream=test-stream \
   access-token-file=/run/secrets/s2-token \
   account-endpoint=http://127.0.0.1:8080 \

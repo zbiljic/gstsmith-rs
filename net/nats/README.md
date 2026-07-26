@@ -26,17 +26,20 @@ environment variable before invoking it to test another endpoint.
 
 ## Examples
 
+These examples assume `mise run build` has completed from the repository root.
+
 Publish bytes:
 
 ```sh
-printf 'hello' | gst-launch-1.0 fdsrc ! \
+printf 'hello' | GST_PLUGIN_PATH="$PWD/target/debug" gst-launch-1.0 fdsrc ! \
   natssink servers=nats://127.0.0.1:4222 subject=demo.bytes
 ```
 
 Subscribe to bytes:
 
 ```sh
-gst-launch-1.0 natssrc servers=nats://127.0.0.1:4222 \
+GST_PLUGIN_PATH="$PWD/target/debug" gst-launch-1.0 \
+  natssrc servers=nats://127.0.0.1:4222 \
   subject=demo.bytes caps=application/octet-stream ! fdsink
 ```
 

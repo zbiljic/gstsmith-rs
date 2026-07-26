@@ -33,6 +33,31 @@ and elements written in Rust.
 
 ## Building
 
+The workspace requires GStreamer 1.24 or newer, including its development
+headers and pkg-config files, the base runtime plugins, and the
+`gst-inspect-1.0` and `gst-launch-1.0` command-line tools. On Ubuntu, install
+the same packages used by CI:
+
+```sh
+sudo apt-get update
+sudo apt-get install --no-install-recommends \
+  gstreamer1.0-plugins-base \
+  gstreamer1.0-tools \
+  libbz2-dev \
+  libgstreamer1.0-dev \
+  libgstreamer-plugins-base1.0-dev
+```
+
+For macOS and other distributions, follow the
+[official GStreamer installation guide](https://gstreamer.freedesktop.org/documentation/installing/index.html)
+instead of translating these Ubuntu package names. Confirm the development
+and runtime tools are discoverable before building:
+
+```sh
+pkg-config --modversion gstreamer-1.0
+gst-inspect-1.0 --version
+```
+
 Install the pinned toolchain and build every plugin in the workspace:
 
 ```sh
