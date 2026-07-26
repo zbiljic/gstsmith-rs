@@ -26,6 +26,10 @@ run = "cargo test --workspace --all-targets"
 description = "Build workspace crates and examples"
 run = "cargo build --workspace --all-targets"
 
+[tasks."rust:package:check"]
+description = "Validate cargo-c plugin packages"
+run = "ci/check-cargo-c-packages.sh"
+
 [tasks."rust:clean"]
 description = "Remove Rust build artifacts"
 run = "cargo clean"

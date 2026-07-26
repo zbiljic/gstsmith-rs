@@ -42,6 +42,7 @@ jobs:
           sudo apt-get install --no-install-recommends \
             gstreamer1.0-plugins-base \
             gstreamer1.0-tools \
+            libbz2-dev \
             libgstreamer1.0-dev \
             libgstreamer-plugins-base1.0-dev
 
@@ -87,6 +88,9 @@ jobs:
 
       - name: Build plugins
         run: mise run build
+
+      - name: Validate cargo-c packages
+        run: mise run package:check
 
       - name: Inspect console plugin
         env:
