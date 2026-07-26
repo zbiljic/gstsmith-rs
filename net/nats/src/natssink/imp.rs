@@ -264,14 +264,8 @@ impl BaseSinkImpl for NatsSink {
             .connection
             .validate()
             .map_err(Self::settings_error)?;
-        if !settings.subject.is_empty()
-            && settings
-                .subject
-                .bytes()
-                .any(|byte| byte.is_ascii_whitespace())
-        {
-            return Err(Self::settings_error("subject contains whitespace"));
-        }
+        message_meta::validate_optional_fixed_subject(&settings.subject)
+            .map_err(Self::settings_error)?;
         let fixed_headers =
             message_meta::headers_from_array(&settings.headers).map_err(Self::settings_error)?;
         let fixed_headers = (!fixed_headers.is_empty()).then_some(fixed_headers);
@@ -605,6 +599,20 @@ mod tests {
         meta.mut_structure().set("subject", 42_i32);
         assert_eq!(sink.imp().render(&buffer), Err(gst::FlowError::Error));
         stop(&sink);
+    }
+
+    #[test]
+    fn start_rejects_nul_fixed_subject_before_network_setup() {
+        init();
+        let sink = glib::Object::builder::<super::super::NatsSink>().build();
+        sink.imp().settings().subject = "test\0subject".to_owned();
+        let Err(error) = sink.imp().start() else {
+            panic!("NUL fixed subject must fail settings validation");
+        };
+        let diagnostic = error.to_string();
+        assert!(diagnostic.contains("NATS subject must be non-empty"));
+        assert!(diagnostic.contains("NUL bytes"));
+        assert!(!diagnostic.contains("test\0subject"));
     }
 
     #[test]

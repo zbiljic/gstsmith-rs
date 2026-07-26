@@ -26,9 +26,9 @@ pub fn attach(
     reply_subject: Option<&str>,
     headers: Option<&async_nats::HeaderMap>,
 ) -> Result<(), String> {
-    validate_subject(subject)?;
+    validate_required_subject(subject)?;
     if let Some(reply) = reply_subject {
-        validate_subject(reply)?;
+        validate_required_subject(reply)?;
     }
 
     let mut meta = gst::meta::CustomMeta::add(buffer, META_NAME)
@@ -51,14 +51,14 @@ pub fn read(buffer: &gst::BufferRef) -> Result<Envelope, String> {
     let subject = structure
         .get::<String>("subject")
         .map_err(|_error| "GstNatsMessageMeta subject is missing or is not a string".to_owned())?;
-    validate_subject(&subject)?;
+    validate_required_subject(&subject)?;
 
     let reply_subject = match structure.get_optional::<String>("reply-subject") {
         Ok(Some(reply)) => {
             if reply.is_empty() {
                 None
             } else {
-                validate_subject(&reply)?;
+                validate_required_subject(&reply)?;
                 Some(reply)
             }
         }
@@ -85,13 +85,24 @@ pub fn is_present(buffer: &gst::BufferRef) -> bool {
     gst::meta::CustomMeta::from_buffer(buffer, META_NAME).is_ok()
 }
 
-fn validate_subject(subject: &str) -> Result<(), String> {
-    if subject.is_empty()
+pub(crate) fn validate_required_subject(subject: &str) -> Result<(), String> {
+    validate_subject(subject, false)
+}
+
+pub(crate) fn validate_optional_fixed_subject(subject: &str) -> Result<(), String> {
+    validate_subject(subject, true)
+}
+
+fn validate_subject(subject: &str, empty_is_allowed: bool) -> Result<(), String> {
+    if (!empty_is_allowed && subject.is_empty())
         || subject
             .bytes()
             .any(|byte| byte.is_ascii_whitespace() || byte == b'\0')
     {
-        Err("NATS subject must be non-empty and contain no whitespace".to_owned())
+        Err(
+            "NATS subject must be non-empty and contain no ASCII whitespace or NUL bytes"
+                .to_owned(),
+        )
     } else {
         Ok(())
     }
@@ -153,9 +164,19 @@ pub fn merge_headers(
 mod tests {
     use super::*;
 
+    const SUBJECT_VALIDATION_ERROR: &str =
+        "NATS subject must be non-empty and contain no ASCII whitespace or NUL bytes";
+
     fn init() {
         gst::init().expect("initializing GStreamer");
         register();
+    }
+
+    fn assert_subject_validation_error(result: &Result<(), String>) {
+        assert_eq!(
+            result.as_ref().map_err(String::as_str),
+            Err(SUBJECT_VALIDATION_ERROR)
+        );
     }
 
     #[test]
@@ -217,6 +238,47 @@ mod tests {
             read(&buffer).err().as_deref(),
             Some("GstNatsMessageMeta subject is missing or is not a string")
         );
+    }
+
+    #[test]
+    fn subject_validation_enforces_required_and_optional_fixed_contracts() {
+        init();
+        for subject in ["events", "events.created", "a.b.c"] {
+            assert!(validate_required_subject(subject).is_ok(), "{subject:?}");
+            assert!(
+                validate_optional_fixed_subject(subject).is_ok(),
+                "{subject:?}"
+            );
+        }
+
+        for subject in [
+            "events created",
+            "events\tcreated",
+            "events\ncreated",
+            "events\0created",
+        ] {
+            assert_subject_validation_error(&validate_optional_fixed_subject(subject));
+            assert_subject_validation_error(&validate_required_subject(subject));
+
+            let mut primary_buffer = gst::Buffer::new();
+            assert_subject_validation_error(&attach(
+                primary_buffer.get_mut().expect("new buffer is writable"),
+                subject,
+                None,
+                None,
+            ));
+
+            let mut reply_buffer = gst::Buffer::new();
+            assert_subject_validation_error(&attach(
+                reply_buffer.get_mut().expect("new buffer is writable"),
+                "events.primary",
+                Some(subject),
+                None,
+            ));
+        }
+
+        assert_subject_validation_error(&validate_required_subject(""));
+        assert_eq!(validate_optional_fixed_subject(""), Ok(()));
     }
 
     #[test]
