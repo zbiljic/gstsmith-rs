@@ -371,7 +371,7 @@ impl PushSrcImpl for NatsSrc {
                 return Err(gst::FlowError::Error);
             }
         };
-        let mut buffer = gst::Buffer::from_mut_slice(message.payload.to_vec());
+        let mut buffer = gst::Buffer::from_slice(message.payload.clone());
         message_meta::attach(
             buffer.get_mut().ok_or(gst::FlowError::Error)?,
             message.subject.as_str(),

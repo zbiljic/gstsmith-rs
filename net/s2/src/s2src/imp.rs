@@ -125,7 +125,7 @@ impl S2Src {
         basin: &str,
         stream: &str,
     ) -> Result<gst::Buffer, gst::FlowError> {
-        let mut buffer = gst::Buffer::from_mut_slice(record.body.to_vec());
+        let mut buffer = gst::Buffer::from_slice(record.body.clone());
         meta::attach_record(
             buffer.get_mut().ok_or(gst::FlowError::Error)?,
             basin,
