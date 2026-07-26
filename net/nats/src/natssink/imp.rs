@@ -588,6 +588,33 @@ mod tests {
     }
 
     #[test]
+    fn nonzero_drain_timeout_joins_completed_worker() {
+        init();
+        let sink = glib::Object::builder::<super::super::NatsSink>().build();
+        let (sender, mut receiver) = tokio::sync::mpsc::channel(1);
+        sender.try_send(request()).expect("prefilling test queue");
+        let completed = Arc::new(AtomicBool::new(false));
+        let worker_completed = Arc::clone(&completed);
+        let worker = runtime::runtime().expect("test runtime").spawn(async move {
+            while receiver.recv().await.is_some() {}
+            worker_completed.store(true, Ordering::Relaxed);
+        });
+        *sink.imp().state() = State::Started {
+            sender: Some(sender),
+            worker,
+            failure: Arc::new(Mutex::new(None)),
+            error_posted: Arc::new(AtomicBool::new(false)),
+            flushing: false,
+            fixed_headers: None,
+            drain_timeout: std::time::Duration::from_secs(1),
+        };
+
+        stop(&sink);
+
+        assert!(completed.load(Ordering::Relaxed));
+    }
+
+    #[test]
     fn malformed_metadata_is_rejected_even_with_a_fixed_subject() {
         let (sink, _receiver) = configured_sink(false);
         let mut buffer = gst::Buffer::from_slice([2]);

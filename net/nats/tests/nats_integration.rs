@@ -220,6 +220,47 @@ fn natssink_publishes_binary_and_zero_length_messages() {
 
 #[test]
 #[ignore = "requires NATS_TEST_URL and a real Core NATS server"]
+fn natssink_drains_accepted_messages_on_normal_stop() {
+    init();
+    let runtime = runtime();
+    let peer = connect_peer(&runtime);
+    let subject = unique_subject("sink-drain");
+    let mut subscriber = TestSubscriber::subscribe(&runtime, &peer, subject.clone());
+    runtime
+        .block_on(peer.flush())
+        .expect("activating drain-test subscription");
+
+    let sink = gst::ElementFactory::make("natssink")
+        .property("servers", broker_url())
+        .property("subject", &subject)
+        .property("queue-capacity", 32_u32)
+        .property("drain-timeout", 2_000_000_000_u64)
+        .build()
+        .expect("constructing drain-test sink");
+    let mut harness = gst_check::Harness::with_element(&sink, Some("sink"), None);
+    harness.set_src_caps_str("application/octet-stream");
+    harness.play();
+
+    let mut accepted = Vec::new();
+    for value in 0_u32..16 {
+        let payload = value.to_be_bytes().to_vec();
+        harness
+            .push(gst::Buffer::from_slice(payload.clone()))
+            .expect("queueing drain-test message");
+        accepted.push(payload);
+    }
+
+    sink.set_state(gst::State::Null)
+        .expect("stopping drain-test sink");
+
+    for payload in accepted {
+        let message = subscriber.next("drained message timeout");
+        assert_eq!(message.payload.as_ref(), payload);
+    }
+}
+
+#[test]
+#[ignore = "requires NATS_TEST_URL and a real Core NATS server"]
 fn natssrc_emits_caps_timestamps_and_complete_wildcard_envelope() {
     init();
     let runtime = runtime();
