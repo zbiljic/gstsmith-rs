@@ -9,7 +9,9 @@ use gst::subclass::prelude::*;
 use gst_base::prelude::*;
 use gst_base::subclass::base_src::CreateSuccess;
 use gst_base::subclass::prelude::*;
-use s2_sdk::types::{AppendRetryPolicy, ReadFrom, ReadInput, ReadStart, SequencedRecord};
+use s2_sdk::types::{
+    AppendRetryPolicy, ReadFrom, ReadInput, ReadSessionConfig, ReadStart, SequencedRecord,
+};
 use tokio_util::sync::CancellationToken;
 
 use crate::config::{ConnectionSettings, ValidatedConnection, sanitized_error};
@@ -595,7 +597,7 @@ async fn read_worker(
     }
     let mut session = tokio::select! {
         () = cancel.cancelled() => return Ok(()),
-        result = stream.read_session(input) => {
+        result = stream.read_session(input, ReadSessionConfig::new()) => {
             result.map_err(|error| sanitized_error(&error))?
         }
     };
