@@ -18,7 +18,7 @@ path = "src/lib.rs"
 futures-util = "0.3"
 gst = { workspace = true }
 gst-base = { workspace = true }
-s2-sdk = { version = "=0.32.1", default-features = false, features = ["rustls-ring"] }
+s2-sdk = { version = "=0.34.1", default-features = false, features = ["rustls-ring"] }
 tokio = { version = "1.49", features = ["rt-multi-thread", "sync", "time"] }
 tokio-util = "0.7"
 url = "2.5"
