@@ -1052,7 +1052,7 @@ dependencies = [
  "gstreamer",
  "gstreamer-base",
  "gstreamer-check",
- "s2-sdk",
+ "s2-sdk 0.32.1",
  "s2-testcontainers",
  "tokio",
  "tokio-util",
@@ -2376,6 +2376,32 @@ dependencies = [
 ]
 
 [[package]]
+name = "s2-api"
+version = "0.31.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2ac6483f24dde60844467a00c2127541c496d668a94f623b310b506062f80f46"
+dependencies = [
+ "base64ct",
+ "bytes",
+ "compact_str",
+ "flate2",
+ "futures-core",
+ "futures-util",
+ "http",
+ "itertools 0.15.0",
+ "mime",
+ "prost",
+ "s2-common",
+ "serde",
+ "serde_json",
+ "strum",
+ "thiserror",
+ "time",
+ "tokio-util",
+ "zstd",
+]
+
+[[package]]
 name = "s2-common"
 version = "0.41.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2416,7 +2442,46 @@ dependencies = [
  "prost",
  "rand 0.10.2",
  "rustls",
- "s2-api",
+ "s2-api 0.30.10",
+ "s2-common",
+ "secrecy",
+ "serde",
+ "serde_json",
+ "serde_urlencoded",
+ "thiserror",
+ "time",
+ "tokio",
+ "tokio-muxt",
+ "tokio-stream",
+ "tokio-util",
+ "tracing",
+ "urlencoding",
+ "uuid",
+]
+
+[[package]]
+name = "s2-sdk"
+version = "0.34.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5a0b36f0879ee008384e7036f91e2d676953d27d31c5d998a8030077d67b25da"
+dependencies = [
+ "async-compression",
+ "async-stream",
+ "async-trait",
+ "bytes",
+ "futures-core",
+ "futures-util",
+ "http",
+ "http-body",
+ "http-body-util",
+ "hyper",
+ "hyper-rustls",
+ "hyper-util",
+ "pin-project-lite",
+ "prost",
+ "rand 0.10.2",
+ "rustls",
+ "s2-api 0.31.0",
  "s2-common",
  "secrecy",
  "serde",
@@ -2435,12 +2500,12 @@ dependencies = [
 
 [[package]]
 name = "s2-testcontainers"
-version = "0.41.1"
+version = "0.42.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2faa41e85aba4f7d22a43542aa797f124b9dea56a215eed13a742d5a2c3c4c86"
+checksum = "d6e1b8e253387f2b2ca7e97639ece84cae896758267508b78a3c861d7e5bb2d3"
 dependencies = [
  "reqwest",
- "s2-sdk",
+ "s2-sdk 0.34.1",
  "testcontainers",
  "thiserror",
  "tokio",

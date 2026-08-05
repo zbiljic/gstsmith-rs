@@ -28,7 +28,7 @@ gst-plugin-version-helper = { workspace = true }
 
 [dev-dependencies]
 gst-check = { workspace = true }
-s2-testcontainers = "=0.41.1"
+s2-testcontainers = "=0.42.1"
 
 [features]
 static = []
