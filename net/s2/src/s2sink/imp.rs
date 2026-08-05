@@ -11,7 +11,7 @@ use gst::prelude::*;
 use gst::subclass::prelude::*;
 use gst_base::prelude::*;
 use gst_base::subclass::prelude::*;
-use s2_sdk::batching::BatchingConfig;
+use s2_sdk::batching::{BatchLimits, BatchingConfig};
 use s2_sdk::producer::{ProducerConfig, RecordSubmitTicket};
 use s2_sdk::types::{AppendRecord, AppendRetryPolicy};
 use tokio_util::sync::CancellationToken;
@@ -456,8 +456,7 @@ impl BaseSinkImpl for S2Sink {
             .connection
             .validate(append_policy)
             .map_err(Self::settings_error)?;
-        let batching = BatchingConfig::new()
-            .with_linger(Duration::from_nanos(settings.batch_linger))
+        let batch_limits = BatchLimits::new()
             .with_max_batch_records(
                 usize::try_from(settings.batch_max_records).map_err(Self::settings_error)?,
             )
@@ -466,6 +465,9 @@ impl BaseSinkImpl for S2Sink {
                 usize::try_from(settings.batch_max_bytes).map_err(Self::settings_error)?,
             )
             .map_err(Self::settings_error)?;
+        let batching = BatchingConfig::new()
+            .with_linger(Duration::from_nanos(settings.batch_linger))
+            .with_limits(batch_limits);
         let mut producer = ProducerConfig::new()
             .with_batching(batching)
             .with_max_unacked_bytes(settings.max_unacked_bytes)

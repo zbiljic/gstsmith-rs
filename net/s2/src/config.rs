@@ -5,6 +5,9 @@ use std::time::Duration;
 
 use gst::glib;
 use gst::prelude::*;
+use s2_sdk::error::{
+    AppendError, AppendSessionError, ProducerError, ReadError, ReadSessionError, RequestError,
+};
 use s2_sdk::types::{
     AccountEndpoint, AppendRetryPolicy, BasinEndpoint, BasinName, Compression, FencingToken,
     RetryConfig, S2Config, S2Endpoints, StreamName,
@@ -409,20 +412,87 @@ fn load_secret_file(path: &Path, property: &str) -> Result<String, String> {
     }
 }
 
-pub fn sanitized_error(error: &s2_sdk::types::S2Error) -> String {
-    use s2_sdk::types::S2Error;
-    match error {
-        S2Error::Client(_) => "S2 client operation failed".to_owned(),
-        S2Error::MalformedAccessToken(_) => "S2 access token is malformed".to_owned(),
-        S2Error::Validation(_) => "S2 rejected an invalid request".to_owned(),
-        S2Error::AppendConditionFailed(_) => "S2 append condition failed".to_owned(),
-        S2Error::ReadUnwritten(position) => {
-            format!(
-                "S2 read started beyond the current tail at sequence {}",
-                position.seq_num
-            )
+pub(crate) trait SanitizedS2Error {
+    fn sanitized_message(&self) -> String;
+}
+
+pub(crate) fn sanitized_error<E: SanitizedS2Error>(error: &E) -> String {
+    error.sanitized_message()
+}
+
+impl SanitizedS2Error for RequestError {
+    fn sanitized_message(&self) -> String {
+        match self {
+            Self::Client(_) => "S2 client operation failed".to_owned(),
+            Self::MalformedAccessToken(_) => "S2 access token is malformed".to_owned(),
+            Self::Validation(_) => "S2 rejected an invalid request".to_owned(),
+            Self::Server(response) => format!("S2 server error code {}", response.code),
+            _ => "S2 request failed".to_owned(),
         }
-        S2Error::Server(response) => format!("S2 server error code {}", response.code),
+    }
+}
+
+impl SanitizedS2Error for ReadError {
+    fn sanitized_message(&self) -> String {
+        match self {
+            Self::Request(error) => error.sanitized_message(),
+            Self::ReadUnwritten(position) => {
+                format!(
+                    "S2 read started beyond the current tail at sequence {}",
+                    position.seq_num
+                )
+            }
+            _ => "S2 read failed".to_owned(),
+        }
+    }
+}
+
+impl SanitizedS2Error for ReadSessionError {
+    fn sanitized_message(&self) -> String {
+        match self {
+            Self::Read(error) => error.sanitized_message(),
+            Self::HeartbeatTimeout => "S2 read session heartbeat timed out".to_owned(),
+            _ => "S2 read session failed".to_owned(),
+        }
+    }
+}
+
+impl SanitizedS2Error for AppendError {
+    fn sanitized_message(&self) -> String {
+        match self {
+            Self::Request(error) => error.sanitized_message(),
+            Self::ConditionFailed(_) => "S2 append condition failed".to_owned(),
+            _ => "S2 append failed".to_owned(),
+        }
+    }
+}
+
+impl SanitizedS2Error for AppendSessionError {
+    fn sanitized_message(&self) -> String {
+        match self {
+            Self::Append(error) => error.sanitized_message(),
+            Self::AckTimeout => "S2 append acknowledgement timed out".to_owned(),
+            Self::ServerDisconnected => "S2 append server disconnected".to_owned(),
+            Self::StreamClosedEarly => "S2 append response stream closed early".to_owned(),
+            Self::SessionClosed => "S2 append session was already closed".to_owned(),
+            Self::SessionClosing => "S2 append session is closing".to_owned(),
+            Self::SessionDropped => "S2 append session was dropped".to_owned(),
+            Self::InvalidAck(_) => "S2 append acknowledgement was invalid".to_owned(),
+            _ => "S2 append session failed".to_owned(),
+        }
+    }
+}
+
+impl SanitizedS2Error for ProducerError {
+    fn sanitized_message(&self) -> String {
+        match self {
+            Self::Append(error) => error.sanitized_message(),
+            Self::Validation(_) => "S2 producer input was invalid".to_owned(),
+            Self::ProducerClosed => "S2 producer was already closed".to_owned(),
+            Self::ProducerClosing => "S2 producer is closing".to_owned(),
+            Self::ProducerDropped => "S2 producer was dropped".to_owned(),
+            _ => "S2 producer failed".to_owned(),
+        }
     }
 }
 
@@ -470,7 +540,7 @@ mod tests {
     #[test]
     fn sanitized_sdk_errors_never_include_sensitive_external_text() {
         let sentinel = "SENTINEL_RAW_SECRET";
-        let malformed = s2_sdk::types::S2Error::MalformedAccessToken(sentinel.to_owned());
+        let malformed = RequestError::MalformedAccessToken(sentinel.to_owned());
         assert!(!sanitized_error(&malformed).contains(sentinel));
     }
 
