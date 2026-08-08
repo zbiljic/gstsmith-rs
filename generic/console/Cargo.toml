@@ -1,33 +1,13 @@
 [package]
 name = "gst-plugin-console"
-description = "GStreamer console byte transports and a text-oriented debug tap."
 version = { workspace = true }
-edition = { workspace = true }
+description = "GStreamer console byte transports and a text-oriented debug tap."
 authors = { workspace = true }
+edition = { workspace = true }
 rust-version = { workspace = true }
-readme = "README.md"
 license = { workspace = true }
+readme = "README.md"
 repository = { workspace = true }
-
-[lib]
-name = "gstconsole"
-crate-type = ["cdylib", "rlib"]
-path = "src/lib.rs"
-
-[dependencies]
-gst = { workspace = true }
-gst-base = { workspace = true }
-
-[build-dependencies]
-gst-plugin-version-helper = { workspace = true }
-
-[dev-dependencies]
-gst-check = { workspace = true }
-
-[features]
-static = []
-capi = []
-doc = ["gst/v1_24"]
 
 [package.metadata.capi]
 min_version = "0.9.21"
@@ -43,5 +23,25 @@ import_library = false
 [package.metadata.capi.pkg_config]
 requires_private = "gstreamer-1.0, gstreamer-base-1.0, gobject-2.0, glib-2.0, gmodule-2.0"
 
+[dependencies]
+gst = { workspace = true }
+gst-base = { workspace = true }
+
+[features]
+static = []
+capi = []
+doc = ["gst/v1_24"]
+
+[lib]
+name = "gstconsole"
+crate-type = ["cdylib", "rlib"]
+path = "src/lib.rs"
+
+[dev-dependencies]
+gst-check = { workspace = true }
+
 [lints]
 workspace = true
+
+[build-dependencies]
+gst-plugin-version-helper = { workspace = true }

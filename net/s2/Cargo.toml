@@ -1,39 +1,13 @@
 [package]
 name = "gst-plugin-s2"
-description = "GStreamer S2 durable-stream source and sink elements."
 version = { workspace = true }
-edition = { workspace = true }
+description = "GStreamer S2 durable-stream source and sink elements."
 authors = { workspace = true }
+edition = { workspace = true }
 rust-version = { workspace = true }
-readme = "README.md"
 license = { workspace = true }
+readme = "README.md"
 repository = { workspace = true }
-
-[lib]
-name = "gsts2"
-crate-type = ["cdylib", "rlib"]
-path = "src/lib.rs"
-
-[dependencies]
-futures-util = "0.3"
-gst = { workspace = true }
-gst-base = { workspace = true }
-s2-sdk = { version = "=0.34.1", default-features = false, features = ["rustls-ring"] }
-tokio = { version = "1.49", features = ["rt-multi-thread", "sync", "time"] }
-tokio-util = "0.7"
-url = "2.5"
-
-[build-dependencies]
-gst-plugin-version-helper = { workspace = true }
-
-[dev-dependencies]
-gst-check = { workspace = true }
-s2-testcontainers = "=0.42.1"
-
-[features]
-static = []
-capi = []
-doc = ["gst/v1_24"]
 
 [package.metadata.capi]
 min_version = "0.9.21"
@@ -49,5 +23,31 @@ import_library = false
 [package.metadata.capi.pkg_config]
 requires_private = "gstreamer-1.0, gstreamer-base-1.0, gobject-2.0, glib-2.0, gmodule-2.0"
 
+[dependencies]
+futures-util = "0.3"
+gst = { workspace = true }
+gst-base = { workspace = true }
+s2-sdk = { version = "=0.34.1", default-features = false, features = ["rustls-ring"] }
+tokio = { version = "1.49", features = ["rt-multi-thread", "sync", "time"] }
+tokio-util = "0.7"
+url = "2.5"
+
+[features]
+static = []
+capi = []
+doc = ["gst/v1_24"]
+
+[lib]
+name = "gsts2"
+crate-type = ["cdylib", "rlib"]
+path = "src/lib.rs"
+
+[dev-dependencies]
+gst-check = { workspace = true }
+s2-testcontainers = "=0.42.1"
+
 [lints]
 workspace = true
+
+[build-dependencies]
+gst-plugin-version-helper = { workspace = true }
