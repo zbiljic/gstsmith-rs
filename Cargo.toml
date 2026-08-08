@@ -89,9 +89,3 @@ ignored_unit_patterns = "allow"
 missing_errors_doc = "allow"
 missing_panics_doc = "allow"
 module_name_repetitions = "allow"
-
-[profile.release]
-codegen-units = 1
-lto = true
-opt-level = "s"
-strip = true
