@@ -34,6 +34,7 @@ packages=(
   "gst-plugin-nats|gstnats|nats|natssrc natssink"
   "gst-plugin-s2|gsts2|s2|s2src s2sink"
   "gst-plugin-tract-inference|gsttractinference|tractinference|tractinference"
+  "gst-plugin-ort-inference|gstortinference|ortinference|ortinference"
 )
 
 case "$(uname -s)" in
@@ -79,12 +80,12 @@ shopt -s nullglob
 dynamic_files=("$plugin_dir"/lib*."$dynamic_suffix")
 static_files=("$plugin_dir"/lib*.a)
 pc_files=("$pc_dir"/*.pc)
-test "${#dynamic_files[@]}" -eq 5 ||
-  fail "expected exactly 5 dynamic plugin libraries, found ${#dynamic_files[@]}"
-test "${#static_files[@]}" -eq 5 ||
-  fail "expected exactly 5 static plugin archives, found ${#static_files[@]}"
-test "${#pc_files[@]}" -eq 5 ||
-  fail "expected exactly 5 pkg-config modules, found ${#pc_files[@]}"
+test "${#dynamic_files[@]}" -eq 6 ||
+  fail "expected exactly 6 dynamic plugin libraries, found ${#dynamic_files[@]}"
+test "${#static_files[@]}" -eq 6 ||
+  fail "expected exactly 6 static plugin archives, found ${#static_files[@]}"
+test "${#pc_files[@]}" -eq 6 ||
+  fail "expected exactly 6 pkg-config modules, found ${#pc_files[@]}"
 
 unset PKG_CONFIG_LIBDIR
 export PKG_CONFIG_PATH="$pc_dir"
@@ -186,10 +187,11 @@ EOF
 compile_static_consumer() {
   local source="$1"
   local binary="$2"
-  shift 2
+  local module="$3"
+  shift 3
   local -a static_flags
-  read -r -a static_flags <<<"$(pkg-config --static --cflags --libs "$@")"
-  cc "$source" -o "$binary" "${static_flags[@]}"
+  read -r -a static_flags <<<"$(pkg-config --static --cflags --libs "$module")"
+  cc "$source" -o "$binary" "${static_flags[@]}" "$@"
 }
 
 export GST_REGISTRY="$stage_root/static-registry.bin"
@@ -203,10 +205,19 @@ for mapping in "${packages[@]}"; do
     "GST_PLUGIN_STATIC_DECLARE($plugin);" \
     "  GST_PLUGIN_STATIC_REGISTER($plugin);" \
     "!registry_has_plugin(registry, \"$plugin\")"
-  compile_static_consumer "$static_source" "$static_binary" "$stem"
+  static_extra_flags=()
+  if [[ "$plugin" == "ortinference" && "$(uname -s)" == "Darwin" ]]; then
+    runtime_dir="$(cc --print-runtime-dir)"
+    test -n "$runtime_dir" || fail "cc --print-runtime-dir returned an empty directory"
+    test -d "$runtime_dir" || fail "cc runtime directory does not exist: $runtime_dir"
+    test -f "$runtime_dir/libclang_rt.osx.a" ||
+      fail "cc runtime directory lacks libclang_rt.osx.a: $runtime_dir"
+    static_extra_flags+=("-L$runtime_dir")
+  fi
+  compile_static_consumer "$static_source" "$static_binary" "$stem" "${static_extra_flags[@]}"
   "$static_binary"
 done
 
 printf 'Validated dynamic plugins: %s\n' "${plugin_names[*]}"
 printf 'Validated pkg-config modules: %s\n' "${modules[*]}"
-printf 'Validated 5 static archives with one static consumer per plugin\n'
+printf 'Validated 6 static archives with one static consumer per plugin\n'
