@@ -22,6 +22,59 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
+  gstreamer-124:
+    name: Check GStreamer 1.24 plugins
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Install GStreamer 1.24
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends \
+            gstreamer1.0-plugins-base \
+            gstreamer1.0-tools \
+            libbz2-dev \
+            libgstreamer1.0-dev \
+            libgstreamer-plugins-base1.0-dev
+          pkg-config --atleast-version=1.24 gstreamer-1.0
+          pkg-config --max-version=1.25.99 gstreamer-1.0
+          pkg-config --modversion gstreamer-1.0
+
+      - name: Setup mise
+        uses: jdx/mise-action@v4
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+
+      - name: Check GStreamer 1.24 plugins
+        run: |
+          cargo check --all-targets \
+            -p gst-plugin-console \
+            -p gst-plugin-lines \
+            -p gst-plugin-nats \
+            -p gst-plugin-s2
+
+      - name: Test GStreamer 1.24 plugins
+        run: |
+          cargo test --all-targets \
+            -p gst-plugin-console \
+            -p gst-plugin-lines \
+            -p gst-plugin-nats \
+            -p gst-plugin-s2
+
+      - name: Lint GStreamer 1.24 plugins
+        run: |
+          cargo clippy --all-targets \
+            -p gst-plugin-console \
+            -p gst-plugin-lines \
+            -p gst-plugin-nats \
+            -p gst-plugin-s2 \
+            -- -D warnings
+
   checks:
     name: Run Checks
     runs-on: ${{ vars.RUNNER || 'ubuntu-latest' }}
