@@ -1,0 +1,37 @@
+[package]
+name = "gst-plugin-ort-inference"
+version = { workspace = true }
+description = "Model-agnostic ONNX Runtime tensor inference for GStreamer video pipelines."
+authors = { workspace = true }
+edition = { workspace = true }
+rust-version = { workspace = true }
+license = { workspace = true }
+readme = "README.md"
+repository = { workspace = true }
+
+[dependencies]
+gst = { workspace = true, features = ["v1_28"] }
+gst-analytics = { workspace = true, features = ["v1_28"] }
+gst-base = { workspace = true, features = ["v1_28"] }
+gst-inference-common = { path = "../inference-common" }
+gst-video = { workspace = true, features = ["v1_28"] }
+half = "2.6.0"
+ort = { version = "=2.0.0-rc.13", default-features = false, features = ["std", "download-binaries", "copy-dylibs", "tls-native", "api-27", "half"] }
+
+[features]
+default = []
+static = []
+capi = []
+doc = ["gst/v1_28"]
+coreml = ["ort/coreml"]
+
+[lib]
+name = "gstortinference"
+crate-type = ["cdylib", "rlib"]
+path = "src/lib.rs"
+
+[lints]
+workspace = true
+
+[build-dependencies]
+gst-plugin-version-helper = { workspace = true }
