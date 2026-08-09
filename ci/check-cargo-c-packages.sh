@@ -33,6 +33,7 @@ packages=(
   "gst-plugin-lines|gstlines|lines|lineparse lineenc"
   "gst-plugin-nats|gstnats|nats|natssrc natssink"
   "gst-plugin-s2|gsts2|s2|s2src s2sink"
+  "gst-plugin-tract-inference|gsttractinference|tractinference|tractinference"
 )
 
 case "$(uname -s)" in
@@ -78,12 +79,12 @@ shopt -s nullglob
 dynamic_files=("$plugin_dir"/lib*."$dynamic_suffix")
 static_files=("$plugin_dir"/lib*.a)
 pc_files=("$pc_dir"/*.pc)
-test "${#dynamic_files[@]}" -eq 4 ||
-  fail "expected exactly 4 dynamic plugin libraries, found ${#dynamic_files[@]}"
-test "${#static_files[@]}" -eq 4 ||
-  fail "expected exactly 4 static plugin archives, found ${#static_files[@]}"
-test "${#pc_files[@]}" -eq 4 ||
-  fail "expected exactly 4 pkg-config modules, found ${#pc_files[@]}"
+test "${#dynamic_files[@]}" -eq 5 ||
+  fail "expected exactly 5 dynamic plugin libraries, found ${#dynamic_files[@]}"
+test "${#static_files[@]}" -eq 5 ||
+  fail "expected exactly 5 static plugin archives, found ${#static_files[@]}"
+test "${#pc_files[@]}" -eq 5 ||
+  fail "expected exactly 5 pkg-config modules, found ${#pc_files[@]}"
 
 unset PKG_CONFIG_LIBDIR
 export PKG_CONFIG_PATH="$pc_dir"
@@ -208,4 +209,4 @@ done
 
 printf 'Validated dynamic plugins: %s\n' "${plugin_names[*]}"
 printf 'Validated pkg-config modules: %s\n' "${modules[*]}"
-printf 'Validated 4 static archives with one static consumer per plugin\n'
+printf 'Validated 5 static archives with one static consumer per plugin\n'
