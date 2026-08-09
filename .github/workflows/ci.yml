@@ -204,3 +204,10 @@ jobs:
         env:
           GST_PLUGIN_PATH: ${{ github.workspace }}/target/debug
         run: gst-inspect-1.0 ortinference
+
+      - name: Inspect NanoDet decoder plugin
+        env:
+          GST_PLUGIN_PATH: ${{ github.workspace }}/target/debug
+        run: |
+          gst-inspect-1.0 nanodet
+          gst-inspect-1.0 nanodettensordec
