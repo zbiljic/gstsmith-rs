@@ -1,0 +1,40 @@
+[package]
+name = "gst-plugin-tract-inference"
+version = { workspace = true }
+description = "Model-agnostic Tract ONNX tensor inference for GStreamer video pipelines."
+authors = { workspace = true }
+edition = { workspace = true }
+rust-version = { workspace = true }
+license = { workspace = true }
+readme = "README.md"
+repository = { workspace = true }
+
+[dependencies]
+gst = { workspace = true, features = ["v1_28"] }
+gst-analytics = { workspace = true, features = ["v1_28"] }
+gst-base = { workspace = true, features = ["v1_28"] }
+gst-inference-common = { path = "../inference-common" }
+gst-video = { workspace = true, features = ["v1_28"] }
+tract-onnx = { version = "0.23.0", optional = true }
+
+[features]
+default = ["tract"]
+static = []
+capi = []
+doc = ["gst/v1_28"]
+tract = ["dep:tract-onnx"]
+
+[lib]
+name = "gsttractinference"
+crate-type = ["cdylib", "rlib"]
+path = "src/lib.rs"
+
+[dev-dependencies]
+gst-check = { workspace = true, features = ["v1_28"] }
+tempfile = "3.27.0"
+
+[lints]
+workspace = true
+
+[build-dependencies]
+gst-plugin-version-helper = { workspace = true }

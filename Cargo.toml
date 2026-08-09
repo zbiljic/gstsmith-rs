@@ -1,6 +1,7 @@
 [workspace]
 members = [
     "analytics/inference-common",
+    "analytics/tract-inference",
     "generic/console",
     "net/nats",
     "net/s2",
@@ -23,6 +24,7 @@ gst-analytics = { package = "gstreamer-analytics", version = "0.25.0" }
 gst-base = { package = "gstreamer-base", version = "0.25.3", features = ["v1_24"] }
 gst-check = { package = "gstreamer-check", version = "0.25.0", features = ["v1_24"] }
 gst-plugin-version-helper = "0.8.4"
+gst-video = { package = "gstreamer-video", version = "0.25.3", features = ["v1_24"] }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
