@@ -166,3 +166,9 @@ jobs:
           gst-inspect-1.0 s2
           gst-inspect-1.0 s2src
           gst-inspect-1.0 s2sink
+
+      - name: Inspect Tract inference plugin
+        env:
+          GST_PLUGIN_PATH: ${{ github.workspace }}/target/debug
+        run: |
+          gst-inspect-1.0 tractinference
