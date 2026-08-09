@@ -14,6 +14,15 @@ and elements written in Rust.
       unchanged.
     - `consolesink`: Write exact bytes to standard output or error.
 
+- [`analytics`](analytics/)
+
+  - [`inference-common`](analytics/inference-common/): Shared model-info,
+    preprocessing, caps, and tensor metadata contract for inference plugins.
+  - [`tract-inference`](analytics/tract-inference/): Model-agnostic ONNX tensor
+    inference using Tract.
+    - `tractinference`: Run a static single-image ONNX model with Tract and
+      attach its raw output tensors as `GstTensorMeta`.
+
 - [`net`](net/)
 
   - [`nats`](net/nats/): Core NATS byte-message transports.
@@ -33,10 +42,14 @@ and elements written in Rust.
 
 ## Building
 
-The workspace requires GStreamer 1.24 or newer, including its development
-headers and pkg-config files, the base runtime plugins, and the
-`gst-inspect-1.0` and `gst-launch-1.0` command-line tools. On Ubuntu, install
-the same packages used by CI:
+Building the full workspace requires GStreamer 1.28 or newer because the
+inference plugins use the 1.28 tensor-group contract required by
+`tensordecodebin`. The console, lines, NATS, and S2 plugins remain independently
+buildable against GStreamer 1.24. CI verifies both baselines.
+
+Development requires the relevant GStreamer headers and pkg-config files, the
+base runtime plugins, and the `gst-inspect-1.0` and `gst-launch-1.0`
+command-line tools. On Ubuntu, install the full-workspace packages used by CI:
 
 ```sh
 sudo apt-get update
@@ -45,7 +58,8 @@ sudo apt-get install --no-install-recommends \
   gstreamer1.0-tools \
   libbz2-dev \
   libgstreamer1.0-dev \
-  libgstreamer-plugins-base1.0-dev
+  libgstreamer-plugins-base1.0-dev \
+  libgstreamer-plugins-bad1.0-dev
 ```
 
 For macOS and other distributions, follow the
