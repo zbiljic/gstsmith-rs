@@ -22,6 +22,33 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
+  tract-metal:
+    name: Test Tract Metal provider
+    runs-on: macos-15
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Install GStreamer
+        run: |
+          brew install gstreamer pkgconf
+          pkg-config --atleast-version=1.28 gstreamer-analytics-1.0
+          pkg-config --modversion gstreamer-analytics-1.0
+
+      - name: Setup mise
+        uses: jdx/mise-action@v4
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+
+      - name: Test Metal provider
+        run: cargo test -p gst-plugin-tract-inference --all-targets --features metal -- --nocapture
+
+      - name: Lint Metal provider
+        run: cargo clippy -p gst-plugin-tract-inference --all-targets --features metal -- -D warnings
+
   gstreamer-124:
     name: Check GStreamer 1.24 plugins
     runs-on: ubuntu-24.04
