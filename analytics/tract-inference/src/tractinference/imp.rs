@@ -18,10 +18,23 @@ static CAT: LazyLock<gst::DebugCategory> = LazyLock::new(|| {
     )
 });
 
+#[derive(Clone, Copy, Debug, Default, Eq, glib::Enum, PartialEq)]
+#[repr(i32)]
+#[enum_type(name = "GstSmithTractExecutionProvider")]
+pub enum ExecutionProvider {
+    #[default]
+    #[enum_value(name = "CPU", nick = "cpu")]
+    Cpu = 0,
+
+    #[enum_value(name = "Metal", nick = "metal")]
+    Metal = 1,
+}
+
 #[derive(Default)]
 struct Settings {
     model_file: Option<PathBuf>,
     model_info_file: Option<PathBuf>,
+    execution_provider: ExecutionProvider,
 }
 
 struct State {
@@ -57,6 +70,12 @@ impl ObjectImpl for TractInference {
                     .blurb("Optional model-info file override")
                     .mutable_ready()
                     .build(),
+                glib::ParamSpecEnum::builder::<ExecutionProvider>("execution-provider")
+                    .nick("Execution Provider")
+                    .blurb("Tract execution provider")
+                    .default_value(ExecutionProvider::Cpu)
+                    .mutable_ready()
+                    .build(),
             ]
         });
         PROPERTIES.as_ref()
@@ -66,13 +85,22 @@ impl ObjectImpl for TractInference {
         let Ok(mut settings) = self.settings.lock() else {
             return;
         };
-        let path: Option<String> = match value.get() {
-            Ok(path) => path,
-            Err(_) => return,
-        };
         match pspec.name() {
-            "model-file" => settings.model_file = path.map(PathBuf::from),
-            "model-info-file" => settings.model_info_file = path.map(PathBuf::from),
+            "model-file" => {
+                if let Ok(path) = value.get::<Option<String>>() {
+                    settings.model_file = path.map(PathBuf::from);
+                }
+            }
+            "model-info-file" => {
+                if let Ok(path) = value.get::<Option<String>>() {
+                    settings.model_info_file = path.map(PathBuf::from);
+                }
+            }
+            "execution-provider" => {
+                if let Ok(provider) = value.get::<ExecutionProvider>() {
+                    settings.execution_provider = provider;
+                }
+            }
             _ => gst::warning!(CAT, imp = self, "unexpected property {}", pspec.name()),
         }
     }
@@ -92,7 +120,8 @@ impl ObjectImpl for TractInference {
                 .as_ref()
                 .map(|path| path.to_string_lossy().into_owned())
                 .to_value(),
-            _ => None::<String>.to_value(),
+            "execution-provider" => settings.execution_provider.to_value(),
+            _ => pspec.default_value().clone(),
         }
     }
 }
@@ -148,6 +177,28 @@ impl BaseTransformImpl for TractInference {
     const TRANSFORM_IP_ON_PASSTHROUGH: bool = true;
 
     fn start(&self) -> Result<(), gst::ErrorMessage> {
+        let execution_provider = self
+            .settings
+            .lock()
+            .map_err(|_error| {
+                gst::error_msg!(
+                    gst::LibraryError::Settings,
+                    ["inference settings lock is poisoned"]
+                )
+            })?
+            .execution_provider;
+        if execution_provider == ExecutionProvider::Metal {
+            #[cfg(not(target_os = "macos"))]
+            return Err(gst::error_msg!(
+                gst::LibraryError::Settings,
+                ["Metal execution is only supported on macOS"]
+            ));
+            #[cfg(all(target_os = "macos", not(feature = "metal")))]
+            return Err(gst::error_msg!(
+                gst::LibraryError::Settings,
+                ["Metal support was not compiled; rebuild with the `metal` feature"]
+            ));
+        }
         #[cfg(not(feature = "tract"))]
         return Err(gst::error_msg!(
             gst::LibraryError::Settings,
@@ -187,15 +238,16 @@ impl BaseTransformImpl for TractInference {
                 )
             })?;
             let engine: Box<dyn Engine> = Box::new(
-                crate::engine::tract::TractEngine::load(&model_file, &info).map_err(|error| {
-                    gst::error_msg!(
-                        gst::LibraryError::Settings,
-                        [
-                            "failed to initialize Tract model {}: {error}",
-                            model_file.display()
-                        ]
-                    )
-                })?,
+                crate::engine::tract::TractEngine::load(&model_file, &info, execution_provider)
+                    .map_err(|error| {
+                        gst::error_msg!(
+                            gst::LibraryError::Settings,
+                            [
+                                "failed to initialize Tract model {}: {error}",
+                                model_file.display()
+                            ]
+                        )
+                    })?,
             );
             drop(settings);
             let mut state = self.state.lock().map_err(|_error| {

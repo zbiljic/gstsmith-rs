@@ -8,6 +8,7 @@ pub mod tract {
     use tract_onnx::tract_hir::infer::Factoid;
 
     use super::{Engine, InputTensor, OwnedTensor};
+    use crate::tractinference::imp::ExecutionProvider;
     use gst_inference_common::model_info::{ModelInfo, ScalarType, TensorDescription};
 
     pub struct TractEngine {
@@ -17,7 +18,11 @@ pub mod tract {
     }
 
     impl TractEngine {
-        pub fn load(model_file: &std::path::Path, info: &ModelInfo) -> Result<Self, String> {
+        pub fn load(
+            model_file: &std::path::Path,
+            info: &ModelInfo,
+            execution_provider: ExecutionProvider,
+        ) -> Result<Self, String> {
             let model = tract_onnx::onnx()
                 .model_for_path(model_file)
                 .map_err(|error| format!("failed to load ONNX model: {error}"))?;
@@ -65,9 +70,13 @@ pub mod tract {
                 ScalarType::Uint8 => u8::fact(input.dims.clone()).into(),
                 _ => return Err("model-info permits only float32 or uint8 inputs".to_owned()),
             };
-            let model = model
+            let mut model = model
                 .with_input_fact(0, fact)
                 .map_err(|error| format!("failed to specialize model input: {error}"))?
+                .into_typed()
+                .map_err(|error| format!("failed to convert model to a typed graph: {error}"))?;
+            apply_execution_provider(&mut model, execution_provider)?;
+            let model = model
                 .into_optimized()
                 .map_err(|error| format!("failed to optimize model: {error}"))?;
 
@@ -96,6 +105,34 @@ pub mod tract {
                 outputs: info.outputs().to_vec(),
             })
         }
+    }
+
+    fn apply_execution_provider(
+        model: &mut TypedModel,
+        execution_provider: ExecutionProvider,
+    ) -> Result<(), String> {
+        match execution_provider {
+            ExecutionProvider::Cpu => Ok(()),
+            ExecutionProvider::Metal => apply_metal_transform(model),
+        }
+    }
+
+    #[cfg(all(feature = "metal", target_os = "macos"))]
+    fn apply_metal_transform(model: &mut TypedModel) -> Result<(), String> {
+        use tract_metal::MetalTransform;
+        use tract_onnx::tract_core::transform::ModelTransform;
+
+        MetalTransform::default()
+            .transform(model)
+            .map_err(|error| format!("failed to apply the Tract Metal transform: {error}"))
+    }
+
+    #[cfg(not(all(feature = "metal", target_os = "macos")))]
+    fn apply_metal_transform(_model: &mut TypedModel) -> Result<(), String> {
+        #[cfg(not(target_os = "macos"))]
+        return Err("Metal execution is only supported on macOS".to_owned());
+        #[cfg(all(target_os = "macos", not(feature = "metal")))]
+        return Err("Metal support was not compiled; rebuild with the `metal` feature".to_owned());
     }
 
     impl Engine for TractEngine {
@@ -323,7 +360,12 @@ mod tests {
             "../../inference-common/tests/fixtures/identity.onnx.modelinfo"
         ))
         .map_err(std::io::Error::other)?;
-        let engine = TractEngine::load(model_file.path(), &info).map_err(std::io::Error::other)?;
+        let engine = TractEngine::load(
+            model_file.path(),
+            &info,
+            crate::tractinference::imp::ExecutionProvider::Cpu,
+        )
+        .map_err(std::io::Error::other)?;
         let outputs = engine
             .run(InputTensor::Float32(vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0]))
             .map_err(std::io::Error::other)?;
@@ -378,11 +420,44 @@ mod tests {
             ),
         ] {
             let info = ModelInfo::parse(&invalid).map_err(std::io::Error::other)?;
-            if TractEngine::load(model_file.path(), &info).is_ok() {
+            if TractEngine::load(
+                model_file.path(),
+                &info,
+                crate::tractinference::imp::ExecutionProvider::Cpu,
+            )
+            .is_ok()
+            {
                 return Err(
                     std::io::Error::other("runtime/model-info mismatch was accepted").into(),
                 );
             }
+        }
+        Ok(())
+    }
+
+    #[cfg(all(feature = "metal", target_os = "macos"))]
+    #[test]
+    fn metal_fixture_translates_a_convolution_to_a_device_operation()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use tract_onnx::prelude::*;
+        use tract_onnx::tract_core::transform::ModelTransform;
+
+        let model_file =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/metal-conv.onnx");
+        let mut model = tract_onnx::onnx()
+            .model_for_path(&model_file)?
+            .with_input_fact(0, f32::fact([1, 3, 2, 2]).into())?
+            .into_typed()?;
+        tract_metal::MetalTransform::default().transform(&mut model)?;
+        if !model
+            .nodes()
+            .iter()
+            .any(TypedNode::op_is::<tract_metal::ops::conv::MetalConv>)
+        {
+            return Err(std::io::Error::other(
+                "fixture convolution was not translated to Tract's stable MetalConv operation",
+            )
+            .into());
         }
         Ok(())
     }

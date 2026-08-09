@@ -14,6 +14,27 @@ Backend-neutral model-info parsing, preprocessing, tensor caps, and
 Keeping the Tract backend in its own loadable plugin lets deployments install
 or upgrade inference runtimes independently.
 
+## Execution provider
+
+`execution-provider=cpu` is the default and uses Tract's CPU graph. Metal is an
+opt-in macOS-only build feature:
+
+```sh
+cargo build -p gst-plugin-tract-inference --features metal
+
+GST_PLUGIN_PATH="$PWD/target/debug" gst-launch-1.0 \
+  videotestsrc num-buffers=1 ! videoconvert ! \
+  "video/x-raw,format=RGB,width=320,height=320" ! \
+  tractinference model-file=model.onnx execution-provider=metal ! fakesink
+```
+
+Selecting `metal` on another platform, or from a build compiled without the
+`metal` feature, fails explicitly when the element starts. It never silently
+falls back to an all-CPU engine. Tract dispatches operations supported by its
+Metal transform through Metal; unsupported operations may remain as CPU nodes
+in the same graph. There is no automatic provider selection, device property,
+or performance guarantee.
+
 ```sh
 gst-launch-1.0 filesrc location=input.png ! pngdec ! videoconvert ! \
   "video/x-raw,format=RGB,width=320,height=320" ! \
