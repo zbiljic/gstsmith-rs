@@ -30,6 +30,11 @@ name = "gstortinference"
 crate-type = ["cdylib", "rlib"]
 path = "src/lib.rs"
 
+[dev-dependencies]
+gst-check = { workspace = true, features = ["v1_28"] }
+gst-plugin-tract-inference = { path = "../tract-inference" }
+tempfile = "3.27.0"
+
 [lints]
 workspace = true
 

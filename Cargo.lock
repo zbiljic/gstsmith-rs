@@ -1260,6 +1260,7 @@ name = "gst-plugin-ort-inference"
 version = "0.1.0"
 dependencies = [
  "gst-inference-common",
+ "gst-plugin-tract-inference",
  "gst-plugin-version-helper",
  "gstreamer",
  "gstreamer-analytics",
