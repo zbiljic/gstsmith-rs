@@ -355,6 +355,20 @@ impl BaseTransformImpl for OrtInference {
         Some(tensor::transform_caps(info, direction, caps, filter))
     }
 
+    fn fixate_caps(
+        &self,
+        direction: gst::PadDirection,
+        caps: &gst::Caps,
+        othercaps: gst::Caps,
+    ) -> gst::Caps {
+        let state = self.state.lock().ok();
+        let info = state
+            .as_deref()
+            .and_then(Option::as_ref)
+            .map(|state| &state.info);
+        tensor::fixate_caps(info, direction, caps, othercaps)
+    }
+
     fn transform_ip(
         &self,
         buffer: &mut gst::BufferRef,

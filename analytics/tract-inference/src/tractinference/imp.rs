@@ -327,6 +327,20 @@ impl BaseTransformImpl for TractInference {
         Some(tensor::transform_caps(info, direction, caps, filter))
     }
 
+    fn fixate_caps(
+        &self,
+        direction: gst::PadDirection,
+        caps: &gst::Caps,
+        othercaps: gst::Caps,
+    ) -> gst::Caps {
+        let state = self.state.lock().ok();
+        let info = state
+            .as_deref()
+            .and_then(Option::as_ref)
+            .map(|state| &state.info);
+        tensor::fixate_caps(info, direction, caps, othercaps)
+    }
+
     fn transform_ip(
         &self,
         buffer: &mut gst::BufferRef,
@@ -484,12 +498,27 @@ mod tests {
         let reverse_with_groups =
             BaseTransformImpl::transform_caps(imp, gst::PadDirection::Src, &with_groups, None)
                 .ok_or_else(|| std::io::Error::other("reverse grouped caps transform failed"))?;
-        let groups = reverse_with_groups
+        let reverse_structure = reverse_with_groups
             .structure(0)
-            .ok_or_else(|| std::io::Error::other("missing grouped reverse caps structure"))?
+            .ok_or_else(|| std::io::Error::other("missing grouped reverse caps structure"))?;
+        assert!(!reverse_structure.has_field("tensors"));
+
+        let mut upstream_groups = gst::Structure::new_empty("tensorgroups");
+        upstream_groups.set("unrelated", gst::List::new([gst::Caps::new_any()]));
+        let upstream_caps = gst::Caps::builder("video/x-raw")
+            .field("format", "RGB")
+            .field("tensors", upstream_groups)
+            .build();
+        let forward_with_groups =
+            BaseTransformImpl::transform_caps(imp, gst::PadDirection::Sink, &upstream_caps, None)
+                .ok_or_else(|| std::io::Error::other("forward grouped caps transform failed"))?;
+        let groups = forward_with_groups
+            .structure(0)
+            .ok_or_else(|| std::io::Error::other("missing grouped forward caps structure"))?
             .get::<gst::Structure>("tensors")?;
         assert!(groups.has_field("unrelated"));
-        assert!(!groups.has_field("gstsmith-identity-fixture"));
+        let fixture_group = groups.get::<gst::UniqueList>("gstsmith-identity-fixture")?;
+        assert_eq!(fixture_group.as_slice().len(), 2);
 
         BaseTransformImpl::stop(imp).map_err(std::io::Error::other)?;
         Ok(())
