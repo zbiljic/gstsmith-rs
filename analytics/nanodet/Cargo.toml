@@ -9,6 +9,20 @@ license = { workspace = true }
 readme = "README.md"
 repository = { workspace = true }
 
+[package.metadata.capi]
+min_version = "0.9.21"
+
+[package.metadata.capi.header]
+enabled = false
+
+[package.metadata.capi.library]
+install_subdir = "gstreamer-1.0"
+versioning = false
+import_library = false
+
+[package.metadata.capi.pkg_config]
+requires_private = "gstreamer-1.0 >= 1.28, gstreamer-base-1.0 >= 1.28, gstreamer-video-1.0 >= 1.28, gstreamer-analytics-1.0 >= 1.28, gobject-2.0, glib-2.0, gmodule-2.0"
+
 [dependencies]
 byte-slice-cast = "1"
 gst = { workspace = true, features = ["v1_28"] }
