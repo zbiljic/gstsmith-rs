@@ -199,3 +199,8 @@ jobs:
           GST_PLUGIN_PATH: ${{ github.workspace }}/target/debug
         run: |
           gst-inspect-1.0 tractinference
+
+      - name: Inspect ONNX Runtime inference plugin
+        env:
+          GST_PLUGIN_PATH: ${{ github.workspace }}/target/debug
+        run: gst-inspect-1.0 ortinference
