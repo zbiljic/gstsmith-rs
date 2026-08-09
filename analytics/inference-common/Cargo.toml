@@ -1,0 +1,21 @@
+[package]
+name = "gst-inference-common"
+version = { workspace = true }
+description = "Shared model-info, preprocessing, and tensor contracts for gstsmith inference plugins."
+authors = { workspace = true }
+edition = { workspace = true }
+rust-version = { workspace = true }
+license = { workspace = true }
+readme = "README.md"
+repository = { workspace = true }
+
+[dependencies]
+gst = { workspace = true, features = ["v1_28"] }
+gst-analytics = { workspace = true, features = ["v1_28"] }
+
+[lib]
+name = "gst_inference_common"
+path = "src/lib.rs"
+
+[lints]
+workspace = true

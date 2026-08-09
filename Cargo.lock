@@ -1009,6 +1009,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "gst-inference-common"
+version = "0.1.0"
+dependencies = [
+ "gstreamer",
+ "gstreamer-analytics",
+]
+
+[[package]]
 name = "gst-plugin-console"
 version = "0.1.0"
 dependencies = [
@@ -1092,6 +1100,30 @@ dependencies = [
  "pin-project-lite",
  "smallvec",
  "thiserror",
+]
+
+[[package]]
+name = "gstreamer-analytics"
+version = "0.25.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1394cc55935922dcd79a2767d7ac986aef651939cde10f34624b3c705bbd4bfc"
+dependencies = [
+ "glib",
+ "gstreamer",
+ "gstreamer-analytics-sys",
+ "libc",
+]
+
+[[package]]
+name = "gstreamer-analytics-sys"
+version = "0.25.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8a13cfa85043968bb1d624399b136b3f0b9e8e7bd4e71a7f8f45ace08df25aff"
+dependencies = [
+ "glib-sys",
+ "gstreamer-sys",
+ "libc",
+ "system-deps",
 ]
 
 [[package]]
