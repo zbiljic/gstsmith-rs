@@ -529,7 +529,7 @@ fn attach_metadata(
     }
     let mut relation = gst_analytics::AnalyticsRelationMeta::add(buffer);
     for detection in detections {
-        let Some(label) = labels.get(detection.class).copied() else {
+        let Some(label) = labels.get(usize::from(detection.class)).copied() else {
             gst::error!(
                 CAT,
                 imp = imp,

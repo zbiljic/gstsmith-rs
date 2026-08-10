@@ -65,13 +65,13 @@ pub(super) fn contract_for_dims(dims: &[usize]) -> Option<Contract> {
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(super) struct Detection {
-    pub(super) class: usize,
+    pub(super) class: u8,
     pub(super) score: f32,
     pub(super) x1: f32,
     pub(super) y1: f32,
     pub(super) x2: f32,
     pub(super) y2: f32,
-    pub(super) ordinal: usize,
+    pub(super) ordinal: u16,
 }
 
 fn distribution_expectation<T: Copy>(
@@ -242,6 +242,10 @@ fn decode_values<T: Copy>(
                 if x2 <= x1 || y2 <= y1 {
                     continue;
                 }
+                let class = u8::try_from(class)
+                    .map_err(|_error| format!("NanoDet class {class} exceeds u8"))?;
+                let ordinal = u16::try_from(ordinal)
+                    .map_err(|_error| format!("NanoDet point {ordinal} exceeds u16"))?;
                 candidates.push(Detection {
                     class,
                     score,
