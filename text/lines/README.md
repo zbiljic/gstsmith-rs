@@ -22,13 +22,21 @@ Run these pipelines from the repository root after `mise run build`.
 # Frame newline-delimited stdin records.
 printf 'one\ntwo\n' | \
   GST_PLUGIN_PATH="$PWD/target/debug" \
-  gst-launch-1.0 -q fdsrc ! application/octet-stream ! lineparse ! fakesink
+  gst-launch-1.0 -q \
+    fdsrc \
+    ! application/octet-stream \
+    ! lineparse \
+    ! fakesink
 
 # Frame records, restore their delimiters, and write them to standard output.
 printf 'one\ntwo' | \
   GST_PLUGIN_PATH="$PWD/target/debug" \
-  gst-launch-1.0 -q fdsrc ! application/octet-stream ! \
-    lineparse ! lineenc ! fdsink fd=1
+  gst-launch-1.0 -q \
+    fdsrc \
+    ! application/octet-stream \
+    ! lineparse \
+    ! lineenc \
+    ! fdsink fd=1
 ```
 
 Inspect the plugin and elements with:

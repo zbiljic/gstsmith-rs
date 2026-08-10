@@ -31,16 +31,24 @@ These examples assume `mise run build` has completed from the repository root.
 Publish bytes:
 
 ```sh
-printf 'hello' | GST_PLUGIN_PATH="$PWD/target/debug" gst-launch-1.0 fdsrc ! \
-  natssink servers=nats://127.0.0.1:4222 subject=demo.bytes
+printf 'hello' | \
+  GST_PLUGIN_PATH="$PWD/target/debug" \
+  gst-launch-1.0 \
+    fdsrc \
+    ! natssink \
+        servers=nats://127.0.0.1:4222 \
+        subject=demo.bytes
 ```
 
 Subscribe to bytes:
 
 ```sh
 GST_PLUGIN_PATH="$PWD/target/debug" gst-launch-1.0 \
-  natssrc servers=nats://127.0.0.1:4222 \
-  subject=demo.bytes caps=application/octet-stream ! fdsink
+  natssrc \
+      servers=nats://127.0.0.1:4222 \
+      subject=demo.bytes \
+      caps=application/octet-stream \
+  ! fdsink
 ```
 
 For availability-first operation, enable bounded dropping and initial

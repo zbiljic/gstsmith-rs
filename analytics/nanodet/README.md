@@ -68,14 +68,18 @@ Choose the model-info file matching the model family and input size. The decoder
 infers NanoDet-m versus NanoDet-Plus from the negotiated output shape:
 
 ```sh
-gst-launch-1.0 videotestsrc num-buffers=1 \
-  ! videoconvert ! videoscale add-borders=true \
+gst-launch-1.0 \
+  videotestsrc num-buffers=1 \
+  ! videoconvert \
+  ! videoscale add-borders=true \
   ! video/x-raw,format=RGB,width=416,height=416 \
-  ! tractinference model-file=/path/to/nanodet-plus-m-1.5x-416.onnx \
+  ! tractinference \
+      model-file=/path/to/nanodet-plus-m-1.5x-416.onnx \
       model-channel-order=bgr \
       model-info-file=analytics/nanodet/tests/fixtures/nanodet-plus-m-416.onnx.modelinfo \
   ! nanodettensordec tensor-id=nanodet-output \
-  ! objectdetectionoverlay ! fakesink
+  ! objectdetectionoverlay \
+  ! fakesink
 ```
 
 Replace `tractinference` with `ortinference` to change runtimes without changing

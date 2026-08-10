@@ -28,18 +28,29 @@ Frame newline-delimited standard input explicitly:
 ```sh
 printf 'one\ntwo\n' | \
   GST_PLUGIN_PATH="$PWD/target/debug" \
-  gst-launch-1.0 -q consolesrc ! lineparse ! fakesink
+  gst-launch-1.0 -q \
+    consolesrc \
+    ! lineparse \
+    ! fakesink
 ```
 
 The byte transports also compose with optional payloaders, depayloaders,
 encoders, and parsers without depending on them:
 
 ```text
-... ! gdppay ! consolesink
-consolesrc ! gdpdepay ! ...
+... \
+  ! gdppay \
+  ! consolesink
+consolesrc \
+  ! gdpdepay \
+  ! ...
 
-... ! jsongstenc ! consolesink
-consolesrc ! jsongstparse ! ...
+... \
+  ! jsongstenc \
+  ! consolesink
+consolesrc \
+  ! jsongstparse \
+  ! ...
 ```
 
 `jsongstparse` expects the GStreamer envelope emitted by `jsongstenc`, not an

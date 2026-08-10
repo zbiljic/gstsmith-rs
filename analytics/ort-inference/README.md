@@ -13,8 +13,13 @@ Source pixel format does not imply model channel order. Three model-info
 normalization ranges remain in semantic R, G, B order.
 
 ```sh
-gst-launch-1.0 ... ! "video/x-raw,format=RGB,width=320,height=320" ! \
-  ortinference model-file=model.onnx model-channel-order=bgr ! ...
+gst-launch-1.0 \
+  ... \
+  ! "video/x-raw,format=RGB,width=320,height=320" \
+  ! ortinference \
+      model-file=model.onnx \
+      model-channel-order=bgr \
+  ! ...
 ```
 
 The `execution-provider` property defaults to `cpu`. The optional `coreml`
@@ -31,8 +36,13 @@ complete graph. It is invalid with `execution-provider=cpu`.
 For example, a CoreML session can require complete ORT graph assignment with:
 
 ```sh
-gst-launch-1.0 ... ! ortinference model-file=model.onnx \
-  execution-provider=coreml strict-execution-provider=true ! ...
+gst-launch-1.0 \
+  ... \
+  ! ortinference \
+      model-file=model.onnx \
+      execution-provider=coreml \
+      strict-execution-provider=true \
+  ! ...
 ```
 
 Strict assignment is a diagnostic, not a benchmark or a guarantee that CoreML

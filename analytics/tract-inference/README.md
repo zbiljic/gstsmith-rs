@@ -21,8 +21,13 @@ truthful and pass through unchanged. Source pixel format and model channel
 order are independent.
 
 ```sh
-gst-launch-1.0 ... ! "video/x-raw,format=RGB,width=320,height=320" ! \
-  tractinference model-file=model.onnx model-channel-order=bgr ! ...
+gst-launch-1.0 \
+  ... \
+  ! "video/x-raw,format=RGB,width=320,height=320" \
+  ! tractinference \
+      model-file=model.onnx \
+      model-channel-order=bgr \
+  ! ...
 ```
 
 ## Execution provider
@@ -34,9 +39,13 @@ opt-in macOS-only build feature:
 cargo build -p gst-plugin-tract-inference --features metal
 
 GST_PLUGIN_PATH="$PWD/target/debug" gst-launch-1.0 \
-  videotestsrc num-buffers=1 ! videoconvert ! \
-  "video/x-raw,format=RGB,width=320,height=320" ! \
-  tractinference model-file=model.onnx execution-provider=metal ! fakesink
+  videotestsrc num-buffers=1 \
+  ! videoconvert \
+  ! "video/x-raw,format=RGB,width=320,height=320" \
+  ! tractinference \
+      model-file=model.onnx \
+      execution-provider=metal \
+  ! fakesink
 ```
 
 Selecting `metal` on another platform, or from a build compiled without the
@@ -47,9 +56,14 @@ in the same graph. There is no automatic provider selection, device property,
 or performance guarantee.
 
 ```sh
-gst-launch-1.0 filesrc location=input.png ! pngdec ! videoconvert ! \
-  "video/x-raw,format=RGB,width=320,height=320" ! \
-  tractinference model-file=model.onnx ! my-model-tensor-decoder ! fakesink
+gst-launch-1.0 \
+  filesrc location=input.png \
+  ! pngdec \
+  ! videoconvert \
+  ! "video/x-raw,format=RGB,width=320,height=320" \
+  ! tractinference model-file=model.onnx \
+  ! my-model-tensor-decoder \
+  ! fakesink
 ```
 
 ## Model-info contract
