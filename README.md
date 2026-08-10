@@ -18,6 +18,10 @@ and elements written in Rust.
 
   - [`inference-common`](analytics/inference-common/): Shared model-info,
     preprocessing, caps, and tensor metadata contract for inference plugins.
+  - [`nanodet`](analytics/nanodet/): NanoDet-m and NanoDet-Plus tensor decoding.
+    - `nanodettensordec`: Decode supported 320x320 and 416x416 Float32 or
+      Float16 output tensors into related object-detection and classification
+      analytics metadata.
   - [`tract-inference`](analytics/tract-inference/): Model-agnostic ONNX tensor
     inference using Tract.
     - `tractinference`: Run a static single-image ONNX model with Tract and
