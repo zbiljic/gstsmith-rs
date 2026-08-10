@@ -14,6 +14,17 @@ Backend-neutral model-info parsing, preprocessing, tensor caps, and
 Keeping the Tract backend in its own loadable plugin lets deployments install
 or upgrade inference runtimes independently.
 
+`model-channel-order=rgb` is the READY-mutable default. Set
+`model-channel-order=bgr` when the model expects BGR channel order. This
+changes tensor packing only: source RGB/BGR/RGBA/BGRA caps and video bytes stay
+truthful and pass through unchanged. Source pixel format and model channel
+order are independent.
+
+```sh
+gst-launch-1.0 ... ! "video/x-raw,format=RGB,width=320,height=320" ! \
+  tractinference model-file=model.onnx model-channel-order=bgr ! ...
+```
+
 ## Execution provider
 
 `execution-provider=cpu` is the default and uses Tract's CPU graph. Metal is an
@@ -74,7 +85,8 @@ dir=output
 
 Input dimensions choose HWC (`1,H,W,3`) or CHW (`1,3,H,W`) packing. `ranges`
 maps byte pixels into the model’s range per channel (one range applies to all
-channels; three ranges apply per RGB channel). Source caps retain the input
+channels; three ranges are always semantic R, G, B, including when
+`model-channel-order=bgr`). Source caps retain the input
 video structure and add a `tensors` group keyed by `group-id`; each
 `tensor/strided` descriptor contains the declared dimensions, order, type, and
 tensor ID. Each declared output becomes a separate buffer in `GstTensorMeta`.

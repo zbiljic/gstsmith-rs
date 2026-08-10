@@ -21,7 +21,7 @@ pub fn register(plugin: &gst::Plugin) -> Result<(), glib::BoolError> {
 mod tests {
     use gst::glib::prelude::*;
 
-    use super::OrtInference;
+    use super::{OrtInference, imp};
 
     #[test]
     fn creates_element_with_ready_mutable_backend_properties()
@@ -37,6 +37,7 @@ mod tests {
         element.set_property("model-file", "model.onnx");
         element.set_property("model-info-file", "model.onnx.modelinfo");
         element.set_property("strict-execution-provider", true);
+        element.set_property("model-channel-order", imp::ModelChannelOrder::Bgr);
         if element.property::<Option<String>>("model-file").as_deref() != Some("model.onnx")
             || element
                 .property::<Option<String>>("model-info-file")
@@ -47,6 +48,13 @@ mod tests {
         }
         if !element.property::<bool>("strict-execution-provider") {
             return Err(std::io::Error::other("element did not retain strict property").into());
+        }
+        if element
+            .property_value("model-channel-order")
+            .get::<imp::ModelChannelOrder>()?
+            != imp::ModelChannelOrder::Bgr
+        {
+            return Err(std::io::Error::other("element did not retain channel order").into());
         }
         Ok(())
     }

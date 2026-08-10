@@ -7,7 +7,7 @@ use gst_video::prelude::*;
 
 use crate::engine::{EngineOptions, OrtEngine, Provider};
 use gst_inference_common::model_info::ModelInfo;
-use gst_inference_common::preprocess::{PixelFormat, preprocess};
+use gst_inference_common::preprocess::{ChannelOrder, PixelFormat, preprocess};
 use gst_inference_common::tensor;
 
 static CAT: LazyLock<gst::DebugCategory> = LazyLock::new(|| {
@@ -32,6 +32,17 @@ pub enum ExecutionProvider {
 
 #[derive(Clone, Copy, Debug, Default, Eq, glib::Enum, PartialEq)]
 #[repr(i32)]
+#[enum_type(name = "GstSmithOrtModelChannelOrder")]
+pub enum ModelChannelOrder {
+    #[default]
+    #[enum_value(name = "RGB", nick = "rgb")]
+    Rgb = 0,
+    #[enum_value(name = "BGR", nick = "bgr")]
+    Bgr = 1,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, glib::Enum, PartialEq)]
+#[repr(i32)]
 #[enum_type(name = "GstSmithOrtGraphOptimization")]
 pub enum GraphOptimization {
     Disable = 0,
@@ -50,12 +61,14 @@ struct Settings {
     intra_threads: Option<u32>,
     optimization: GraphOptimization,
     strict_execution_provider: bool,
+    model_channel_order: ModelChannelOrder,
 }
 
 struct State {
     engine: Box<dyn gst_inference_common::engine::Engine>,
     info: ModelInfo,
     video_info: Option<gst_video::VideoInfo>,
+    channel_order: ChannelOrder,
 }
 
 #[derive(Default)]
@@ -109,6 +122,12 @@ impl ObjectImpl for OrtInference {
                     .default_value(false)
                     .mutable_ready()
                     .build(),
+                glib::ParamSpecEnum::builder::<ModelChannelOrder>("model-channel-order")
+                    .nick("Model Channel Order")
+                    .blurb("Channel order expected by the model input tensor")
+                    .default_value(ModelChannelOrder::Rgb)
+                    .mutable_ready()
+                    .build(),
             ]
         });
         PROPERTIES.as_ref()
@@ -149,6 +168,11 @@ impl ObjectImpl for OrtInference {
                     settings.strict_execution_provider = enabled;
                 }
             }
+            "model-channel-order" => {
+                if let Ok(order) = value.get::<ModelChannelOrder>() {
+                    settings.model_channel_order = order;
+                }
+            }
             _ => gst::warning!(CAT, imp = self, "unexpected property {}", pspec.name()),
         }
     }
@@ -172,6 +196,7 @@ impl ObjectImpl for OrtInference {
             "intra-op-threads" => settings.intra_threads.unwrap_or(0).to_value(),
             "graph-optimization" => settings.optimization.to_value(),
             "strict-execution-provider" => settings.strict_execution_provider.to_value(),
+            "model-channel-order" => settings.model_channel_order.to_value(),
             _ => pspec.default_value().clone(),
         }
     }
@@ -290,6 +315,10 @@ impl BaseTransformImpl for OrtInference {
                 ["invalid model-info file {}: {error}", info_file.display()]
             )
         })?;
+        let channel_order = match settings.model_channel_order {
+            ModelChannelOrder::Rgb => ChannelOrder::Rgb,
+            ModelChannelOrder::Bgr => ChannelOrder::Bgr,
+        };
         let engine = OrtEngine::load(&model_file, &info, options).map_err(|error| {
             gst::error_msg!(
                 gst::LibraryError::Settings,
@@ -310,6 +339,7 @@ impl BaseTransformImpl for OrtInference {
             engine: Box::new(engine),
             info,
             video_info: None,
+            channel_order,
         });
         Ok(())
     }
@@ -437,6 +467,7 @@ impl BaseTransformImpl for OrtInference {
             frame.width() as usize,
             frame.height() as usize,
             format,
+            state.channel_order,
             state.info.input(),
         )
         .map_err(|error| {

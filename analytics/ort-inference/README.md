@@ -5,6 +5,18 @@ uses ONNX Runtime and publishes every model output in model-info order through
 the shared `tensor/strided` caps and `GstTensorMeta` contract. Video buffers
 pass through unchanged.
 
+`model-channel-order=rgb` is the READY-mutable default. Set
+`model-channel-order=bgr` for a model that expects BGR channel order. The
+property affects tensor preprocessing only: truthful RGB/BGR/RGBA/BGRA caps
+and video bytes pass through unchanged, and existing metadata is preserved.
+Source pixel format does not imply model channel order. Three model-info
+normalization ranges remain in semantic R, G, B order.
+
+```sh
+gst-launch-1.0 ... ! "video/x-raw,format=RGB,width=320,height=320" ! \
+  ortinference model-file=model.onnx model-channel-order=bgr ! ...
+```
+
 The `execution-provider` property defaults to `cpu`. The optional `coreml`
 Cargo feature adds the `coreml` provider; requesting it when the selected ORT
 runtime does not provide CoreML fails element startup rather than silently

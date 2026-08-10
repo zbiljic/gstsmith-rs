@@ -7,7 +7,7 @@ use gst_video::prelude::*;
 
 use crate::engine::Engine;
 use gst_inference_common::model_info::ModelInfo;
-use gst_inference_common::preprocess::{PixelFormat, preprocess};
+use gst_inference_common::preprocess::{ChannelOrder, PixelFormat, preprocess};
 use gst_inference_common::tensor;
 
 static CAT: LazyLock<gst::DebugCategory> = LazyLock::new(|| {
@@ -30,17 +30,31 @@ pub enum ExecutionProvider {
     Metal = 1,
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, glib::Enum, PartialEq)]
+#[repr(i32)]
+#[enum_type(name = "GstSmithTractModelChannelOrder")]
+pub enum ModelChannelOrder {
+    #[default]
+    #[enum_value(name = "RGB", nick = "rgb")]
+    Rgb = 0,
+
+    #[enum_value(name = "BGR", nick = "bgr")]
+    Bgr = 1,
+}
+
 #[derive(Default)]
 struct Settings {
     model_file: Option<PathBuf>,
     model_info_file: Option<PathBuf>,
     execution_provider: ExecutionProvider,
+    model_channel_order: ModelChannelOrder,
 }
 
 struct State {
     engine: Box<dyn Engine>,
     info: ModelInfo,
     video_info: Option<gst_video::VideoInfo>,
+    channel_order: ChannelOrder,
 }
 
 #[derive(Default)]
@@ -76,6 +90,12 @@ impl ObjectImpl for TractInference {
                     .default_value(ExecutionProvider::Cpu)
                     .mutable_ready()
                     .build(),
+                glib::ParamSpecEnum::builder::<ModelChannelOrder>("model-channel-order")
+                    .nick("Model Channel Order")
+                    .blurb("Channel order expected by the model input tensor")
+                    .default_value(ModelChannelOrder::Rgb)
+                    .mutable_ready()
+                    .build(),
             ]
         });
         PROPERTIES.as_ref()
@@ -101,6 +121,11 @@ impl ObjectImpl for TractInference {
                     settings.execution_provider = provider;
                 }
             }
+            "model-channel-order" => {
+                if let Ok(order) = value.get::<ModelChannelOrder>() {
+                    settings.model_channel_order = order;
+                }
+            }
             _ => gst::warning!(CAT, imp = self, "unexpected property {}", pspec.name()),
         }
     }
@@ -121,6 +146,7 @@ impl ObjectImpl for TractInference {
                 .map(|path| path.to_string_lossy().into_owned())
                 .to_value(),
             "execution-provider" => settings.execution_provider.to_value(),
+            "model-channel-order" => settings.model_channel_order.to_value(),
             _ => pspec.default_value().clone(),
         }
     }
@@ -237,6 +263,10 @@ impl BaseTransformImpl for TractInference {
                     ["invalid model-info file {}: {error}", info_file.display()]
                 )
             })?;
+            let channel_order = match settings.model_channel_order {
+                ModelChannelOrder::Rgb => ChannelOrder::Rgb,
+                ModelChannelOrder::Bgr => ChannelOrder::Bgr,
+            };
             let engine: Box<dyn Engine> = Box::new(
                 crate::engine::tract::TractEngine::load(&model_file, &info, execution_provider)
                     .map_err(|error| {
@@ -260,6 +290,7 @@ impl BaseTransformImpl for TractInference {
                 engine,
                 info,
                 video_info: None,
+                channel_order,
             });
             Ok(())
         }
@@ -390,6 +421,7 @@ impl BaseTransformImpl for TractInference {
             frame.width() as usize,
             frame.height() as usize,
             format,
+            state.channel_order,
             state.info.input(),
         )
         .map_err(|error| {

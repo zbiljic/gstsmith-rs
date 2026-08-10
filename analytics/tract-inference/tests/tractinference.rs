@@ -140,6 +140,35 @@ fn execution_provider_nick(element: &gst::Element) -> String {
     enum_value.nick().to_owned()
 }
 
+fn enum_nick(element: &gst::Element, property: &str) -> String {
+    let value = element.property_value(property);
+    let (_class, enum_value) =
+        gst::glib::EnumValue::from_value(&value).expect("property has an enum value");
+    enum_value.nick().to_owned()
+}
+
+#[test]
+fn model_channel_order_has_stable_values_and_round_trips() {
+    init();
+    let element = gst::ElementFactory::make("tractinference")
+        .build()
+        .expect("creating Tract inference element");
+    let pspec = element
+        .find_property("model-channel-order")
+        .expect("model-channel-order property exists");
+    assert_eq!(pspec.value_type().name(), "GstSmithTractModelChannelOrder");
+    assert!(pspec.flags().contains(gst::PARAM_FLAG_MUTABLE_READY));
+    let class = gst::glib::EnumClass::with_type(pspec.value_type())
+        .expect("model-channel-order uses a GLib enum");
+    assert_eq!(class.value(0).map(gst::glib::EnumValue::nick), Some("rgb"));
+    assert_eq!(class.value(1).map(gst::glib::EnumValue::nick), Some("bgr"));
+    assert_eq!(enum_nick(&element, "model-channel-order"), "rgb");
+    element.set_property_from_str("model-channel-order", "bgr");
+    assert_eq!(enum_nick(&element, "model-channel-order"), "bgr");
+    element.set_property_from_str("model-channel-order", "rgb");
+    assert_eq!(enum_nick(&element, "model-channel-order"), "rgb");
+}
+
 #[test]
 fn execution_provider_has_stable_values_and_round_trips() {
     init();

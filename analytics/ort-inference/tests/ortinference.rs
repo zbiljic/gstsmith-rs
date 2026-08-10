@@ -140,6 +140,7 @@ fn enum_nick(element: &gst::Element, property: &str) -> String {
 fn assert_tensor_contract(
     element: &gst::Element,
     output: &gst::Buffer,
+    expected_values: &[f32],
 ) -> Result<(), Box<dyn std::error::Error>> {
     let meta = output
         .meta::<gst_analytics::TensorMeta>()
@@ -151,7 +152,7 @@ fn assert_tensor_contract(
         assert_eq!(tensor.data_type(), gst_analytics::TensorDataType::Float32);
         assert_eq!(tensor.dims(), [1, 1, 2, 3]);
         assert_eq!(tensor.dims_order(), gst_analytics::TensorDimOrder::RowMajor);
-        assert_eq!(tensor_values(tensor), [1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
+        assert_eq!(tensor_values(tensor), expected_values);
     }
 
     let negotiated = element
@@ -162,6 +163,7 @@ fn assert_tensor_contract(
     let structure = negotiated
         .structure(0)
         .ok_or_else(|| std::io::Error::other("source caps structure is missing"))?;
+    assert_eq!(structure.get::<String>("format")?, "RGB");
     let groups = structure.get::<gst::Structure>("tensors")?;
     let descriptors = groups.get::<gst::UniqueList>("gstsmith-identity-fixture")?;
     assert_eq!(descriptors.as_slice().len(), 2);
@@ -186,14 +188,60 @@ fn assert_tensor_contract(
 fn run_factory(
     factory: &str,
 ) -> Result<(gst::Buffer, gst::Caps, tempfile::TempDir), Box<dyn std::error::Error>> {
+    run_factory_with_order(factory, "rgb", &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0])
+}
+
+fn run_factory_with_order(
+    factory: &str,
+    order: &str,
+    expected_values: &[f32],
+) -> Result<(gst::Buffer, gst::Caps, tempfile::TempDir), Box<dyn std::error::Error>> {
     let (element, directory) = fixture_element(factory)?;
+    element.set_property_from_str("model-channel-order", order);
     let caps = caps();
     let mut harness = gst_check::Harness::with_element(&element, Some("sink"), Some("src"));
     harness.set_src_caps(caps.clone());
     harness.play();
     let output = harness.push_and_pull(input_buffer(&caps))?;
-    assert_tensor_contract(&element, &output)?;
+    assert_tensor_contract(&element, &output, expected_values)?;
     Ok((output, caps, directory))
+}
+
+#[test]
+fn bgr_model_order_matches_backends_and_preserves_truthful_rgb_video()
+-> Result<(), Box<dyn std::error::Error>> {
+    let expected_tensors = [3.0, 2.0, 1.0, 6.0, 5.0, 4.0];
+    let (ort_output, caps, _ort_directory) =
+        run_factory_with_order("ortinference", "bgr", &expected_tensors)?;
+    let (tract_output, _tract_caps, _tract_directory) =
+        run_factory_with_order("tractinference", "bgr", &expected_tensors)?;
+    let expected_video = input_buffer(&caps).map_readable()?.as_slice().to_vec();
+    for output in [&ort_output, &tract_output] {
+        assert_eq!(output.map_readable()?.as_slice(), expected_video);
+        assert_eq!(output.pts(), Some(gst::ClockTime::from_seconds(5)));
+        assert_eq!(output.dts(), Some(gst::ClockTime::from_seconds(4)));
+        assert_eq!(output.duration(), Some(gst::ClockTime::from_mseconds(250)));
+        assert!(
+            output
+                .flags()
+                .contains(gst::BufferFlags::DISCONT | gst::BufferFlags::MARKER)
+        );
+        assert!(output.meta::<gst::ReferenceTimestampMeta>().is_some());
+    }
+    let ort_meta = ort_output
+        .meta::<gst_analytics::TensorMeta>()
+        .expect("ORT metadata");
+    let tract_meta = tract_output
+        .meta::<gst_analytics::TensorMeta>()
+        .expect("Tract metadata");
+    for (ort_tensor, tract_tensor) in ort_meta.as_slice().iter().zip(tract_meta.as_slice()) {
+        assert_eq!(ort_tensor.id(), tract_tensor.id());
+        assert_eq!(ort_tensor.data_type(), tract_tensor.data_type());
+        assert_eq!(ort_tensor.dims(), tract_tensor.dims());
+        assert_eq!(ort_tensor.dims_order(), tract_tensor.dims_order());
+        assert_eq!(tensor_values(ort_tensor), tensor_values(tract_tensor));
+    }
+    Ok(())
 }
 
 #[cfg(all(feature = "coreml", target_os = "macos"))]
@@ -359,9 +407,14 @@ fn properties_have_backend_defaults_and_ready_mutability() -> Result<(), Box<dyn
     assert_eq!(enum_nick(&element, "execution-provider"), "cpu");
     assert_eq!(element.property::<u32>("intra-op-threads"), 0);
     assert_eq!(enum_nick(&element, "graph-optimization"), "level3");
+    assert_eq!(enum_nick(&element, "model-channel-order"), "rgb");
     assert!(!element.property::<bool>("strict-execution-provider"));
     element.set_property("strict-execution-provider", true);
+    element.set_property_from_str("model-channel-order", "bgr");
     assert!(element.property::<bool>("strict-execution-provider"));
+    assert_eq!(enum_nick(&element, "model-channel-order"), "bgr");
+    element.set_property_from_str("model-channel-order", "rgb");
+    assert_eq!(enum_nick(&element, "model-channel-order"), "rgb");
     for name in [
         "model-file",
         "model-info-file",
@@ -369,6 +422,7 @@ fn properties_have_backend_defaults_and_ready_mutability() -> Result<(), Box<dyn
         "intra-op-threads",
         "graph-optimization",
         "strict-execution-provider",
+        "model-channel-order",
     ] {
         let property = element
             .find_property(name)
@@ -378,6 +432,14 @@ fn properties_have_backend_defaults_and_ready_mutability() -> Result<(), Box<dyn
             "{name} must be READY-mutable"
         );
     }
+    let property = element
+        .find_property("model-channel-order")
+        .ok_or_else(|| std::io::Error::other("missing model channel order property"))?;
+    assert_eq!(property.value_type().name(), "GstSmithOrtModelChannelOrder");
+    let class = gst::glib::EnumClass::with_type(property.value_type())
+        .ok_or_else(|| std::io::Error::other("model channel order is not an enum"))?;
+    assert_eq!(class.value(0).map(gst::glib::EnumValue::nick), Some("rgb"));
+    assert_eq!(class.value(1).map(gst::glib::EnumValue::nick), Some("bgr"));
     Ok(())
 }
 
@@ -495,6 +557,7 @@ fn benchmark_fixture_backends_reports_preprocessing_inference_and_total()
                 2,
                 1,
                 gst_inference_common::preprocess::PixelFormat::Rgb,
+                gst_inference_common::preprocess::ChannelOrder::Rgb,
                 info.input(),
             )?;
         }

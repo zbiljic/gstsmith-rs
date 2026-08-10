@@ -36,8 +36,11 @@ Matching model-info companions are provided under [`tests/fixtures`](tests/fixtu
 - `nanodet-plus-m-416.onnx.modelinfo`
 
 They describe Float32 outputs. For a model with a Float16 output, copy the
-matching file and change the output `type` to `float16`. The supplied profiles
-expect packed BGR input and include the required normalization ranges.
+matching file and change the output `type` to `float16`. The supplied published
+model profiles expect BGR channel order and include normalization ranges in
+semantic R, G, B order. Configure either inference backend with
+`model-channel-order=bgr`; source caps can truthfully remain RGB, BGR, RGBA, or
+BGRA, and the video passes through unchanged.
 
 ## Properties and metadata
 
@@ -67,15 +70,16 @@ infers NanoDet-m versus NanoDet-Plus from the negotiated output shape:
 ```sh
 gst-launch-1.0 videotestsrc num-buffers=1 \
   ! videoconvert ! videoscale add-borders=true \
-  ! video/x-raw,format=BGR,width=416,height=416 \
+  ! video/x-raw,format=RGB,width=416,height=416 \
   ! tractinference model-file=/path/to/nanodet-plus-m-1.5x-416.onnx \
+      model-channel-order=bgr \
       model-info-file=analytics/nanodet/tests/fixtures/nanodet-plus-m-416.onnx.modelinfo \
   ! nanodettensordec tensor-id=nanodet-output \
   ! objectdetectionoverlay ! fakesink
 ```
 
 Replace `tractinference` with `ortinference` to change runtimes without changing
-the decoder configuration.
+the model channel-order or decoder configuration.
 
 ## Decoder benchmark
 
