@@ -27,6 +27,10 @@ name = "gstnanodet"
 crate-type = ["cdylib", "rlib"]
 path = "src/lib.rs"
 
+[dev-dependencies]
+gst-check = { workspace = true, features = ["v1_28"] }
+tempfile = "3.27.0"
+
 [lints]
 workspace = true
 

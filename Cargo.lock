@@ -1256,8 +1256,10 @@ dependencies = [
  "gstreamer",
  "gstreamer-analytics",
  "gstreamer-base",
+ "gstreamer-check",
  "gstreamer-video",
  "half",
+ "tempfile",
 ]
 
 [[package]]
