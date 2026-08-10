@@ -1,6 +1,7 @@
 [workspace]
 members = [
     "analytics/inference-common",
+    "analytics/nanodet",
     "analytics/ort-inference",
     "analytics/tract-inference",
     "generic/console",

@@ -362,6 +362,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "72f5acc6cb2ba439de613abc23857ec3d78374d8ed5ac84e9d11336e87da8649"
 
 [[package]]
+name = "byte-slice-cast"
+version = "1.2.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7575182f7272186991736b70173b0ea045398f984bf5ebbb3804736ce1330c9d"
+
+[[package]]
 name = "byteorder"
 version = "1.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1239,6 +1245,19 @@ dependencies = [
  "gstreamer-base",
  "gstreamer-check",
  "memchr",
+]
+
+[[package]]
+name = "gst-plugin-nanodet"
+version = "0.1.0"
+dependencies = [
+ "byte-slice-cast",
+ "gst-plugin-version-helper",
+ "gstreamer",
+ "gstreamer-analytics",
+ "gstreamer-base",
+ "gstreamer-video",
+ "half",
 ]
 
 [[package]]
