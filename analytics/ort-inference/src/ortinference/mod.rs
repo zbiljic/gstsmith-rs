@@ -36,6 +36,7 @@ mod tests {
         let element = gst::ElementFactory::make("ortinference-test").build()?;
         element.set_property("model-file", "model.onnx");
         element.set_property("model-info-file", "model.onnx.modelinfo");
+        element.set_property("strict-execution-provider", true);
         if element.property::<Option<String>>("model-file").as_deref() != Some("model.onnx")
             || element
                 .property::<Option<String>>("model-info-file")
@@ -43,6 +44,9 @@ mod tests {
                 != Some("model.onnx.modelinfo")
         {
             return Err(std::io::Error::other("element did not retain READY properties").into());
+        }
+        if !element.property::<bool>("strict-execution-provider") {
+            return Err(std::io::Error::other("element did not retain strict property").into());
         }
         Ok(())
     }

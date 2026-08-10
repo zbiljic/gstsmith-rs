@@ -5,7 +5,7 @@ use gst::{glib, prelude::*, subclass::prelude::*};
 use gst_base::subclass::prelude::*;
 use gst_video::prelude::*;
 
-use crate::engine::{OrtEngine, Provider};
+use crate::engine::{EngineOptions, OrtEngine, Provider};
 use gst_inference_common::model_info::ModelInfo;
 use gst_inference_common::preprocess::{PixelFormat, preprocess};
 use gst_inference_common::tensor;
@@ -49,6 +49,7 @@ struct Settings {
     execution_provider: ExecutionProvider,
     intra_threads: Option<u32>,
     optimization: GraphOptimization,
+    strict_execution_provider: bool,
 }
 
 struct State {
@@ -102,6 +103,12 @@ impl ObjectImpl for OrtInference {
                     .default_value(GraphOptimization::Level3)
                     .mutable_ready()
                     .build(),
+                glib::ParamSpecBoolean::builder("strict-execution-provider")
+                    .nick("Strict Execution Provider")
+                    .blurb("Disable ONNX Runtime CPU fallback for a non-CPU provider")
+                    .default_value(false)
+                    .mutable_ready()
+                    .build(),
             ]
         });
         PROPERTIES.as_ref()
@@ -137,6 +144,11 @@ impl ObjectImpl for OrtInference {
                     settings.optimization = level;
                 }
             }
+            "strict-execution-provider" => {
+                if let Ok(enabled) = value.get::<bool>() {
+                    settings.strict_execution_provider = enabled;
+                }
+            }
             _ => gst::warning!(CAT, imp = self, "unexpected property {}", pspec.name()),
         }
     }
@@ -159,6 +171,7 @@ impl ObjectImpl for OrtInference {
             "execution-provider" => settings.execution_provider.to_value(),
             "intra-op-threads" => settings.intra_threads.unwrap_or(0).to_value(),
             "graph-optimization" => settings.optimization.to_value(),
+            "strict-execution-provider" => settings.strict_execution_provider.to_value(),
             _ => pspec.default_value().clone(),
         }
     }
@@ -221,6 +234,37 @@ impl BaseTransformImpl for OrtInference {
                 ["inference settings lock is poisoned"]
             )
         })?;
+        let provider = match settings.execution_provider {
+            ExecutionProvider::Cpu => Provider::Cpu,
+            #[cfg(feature = "coreml")]
+            ExecutionProvider::Coreml => Provider::Coreml,
+        };
+        let threads = settings
+            .intra_threads
+            .map(|value| {
+                usize::try_from(value).map_err(|_error| {
+                    gst::error_msg!(
+                        gst::LibraryError::Settings,
+                        ["intra-op-threads does not fit the platform usize"]
+                    )
+                })
+            })
+            .transpose()?;
+        let optimization = match settings.optimization {
+            GraphOptimization::Disable => ort::session::builder::GraphOptimizationLevel::Disable,
+            GraphOptimization::Level1 => ort::session::builder::GraphOptimizationLevel::Level1,
+            GraphOptimization::Level2 => ort::session::builder::GraphOptimizationLevel::Level2,
+            GraphOptimization::Level3 => ort::session::builder::GraphOptimizationLevel::Level3,
+            GraphOptimization::All => ort::session::builder::GraphOptimizationLevel::All,
+        };
+        let options = EngineOptions {
+            provider,
+            intra_threads: threads,
+            optimization,
+            strict_execution_provider: settings.strict_execution_provider,
+        }
+        .validate()
+        .map_err(|error| gst::error_msg!(gst::LibraryError::Settings, ["{error}"]))?;
         let model_file = settings.model_file.clone().ok_or_else(|| {
             gst::error_msg!(
                 gst::LibraryError::Settings,
@@ -246,40 +290,15 @@ impl BaseTransformImpl for OrtInference {
                 ["invalid model-info file {}: {error}", info_file.display()]
             )
         })?;
-        let provider = match settings.execution_provider {
-            ExecutionProvider::Cpu => Provider::Cpu,
-            #[cfg(feature = "coreml")]
-            ExecutionProvider::Coreml => Provider::Coreml,
-        };
-        let threads = settings
-            .intra_threads
-            .map(|value| {
-                usize::try_from(value).map_err(|_error| {
-                    gst::error_msg!(
-                        gst::LibraryError::Settings,
-                        ["intra-op-threads does not fit the platform usize"]
-                    )
-                })
-            })
-            .transpose()?;
-        let optimization = match settings.optimization {
-            GraphOptimization::Disable => ort::session::builder::GraphOptimizationLevel::Disable,
-            GraphOptimization::Level1 => ort::session::builder::GraphOptimizationLevel::Level1,
-            GraphOptimization::Level2 => ort::session::builder::GraphOptimizationLevel::Level2,
-            GraphOptimization::Level3 => ort::session::builder::GraphOptimizationLevel::Level3,
-            GraphOptimization::All => ort::session::builder::GraphOptimizationLevel::All,
-        };
-        let engine = OrtEngine::load(&model_file, &info, provider, threads, optimization).map_err(
-            |error| {
-                gst::error_msg!(
-                    gst::LibraryError::Settings,
-                    [
-                        "failed to initialize ONNX Runtime model {}: {error}",
-                        model_file.display()
-                    ]
-                )
-            },
-        )?;
+        let engine = OrtEngine::load(&model_file, &info, options).map_err(|error| {
+            gst::error_msg!(
+                gst::LibraryError::Settings,
+                [
+                    "failed to initialize ONNX Runtime model {}: {error}",
+                    model_file.display()
+                ]
+            )
+        })?;
         drop(settings);
         let mut state = self.state.lock().map_err(|_error| {
             gst::error_msg!(

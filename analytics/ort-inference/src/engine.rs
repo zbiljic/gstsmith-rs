@@ -17,6 +17,37 @@ pub enum Provider {
     Coreml,
 }
 
+impl Provider {
+    fn name(self) -> &'static str {
+        match self {
+            Self::Cpu => "cpu",
+            #[cfg(feature = "coreml")]
+            Self::Coreml => "coreml",
+        }
+    }
+}
+
+/// Configuration applied while constructing one ORT session.
+#[derive(Clone, Copy, Debug)]
+pub struct EngineOptions {
+    pub provider: Provider,
+    pub intra_threads: Option<usize>,
+    pub optimization: GraphOptimizationLevel,
+    pub strict_execution_provider: bool,
+}
+
+impl EngineOptions {
+    pub fn validate(self) -> Result<Self, String> {
+        if self.strict_execution_provider && self.provider == Provider::Cpu {
+            return Err(format!(
+                "strict-execution-provider=true is invalid with execution-provider={}",
+                self.provider.name()
+            ));
+        }
+        Ok(self)
+    }
+}
+
 /// ORT's session API requires mutable access to run. The mutex serializes runs
 /// on one session and, importantly, owns all output copies before unlocking.
 pub struct OrtEngine {
@@ -29,20 +60,19 @@ impl OrtEngine {
     pub fn load(
         model_file: &Path,
         info: &ModelInfo,
-        provider: Provider,
-        intra_threads: Option<usize>,
-        optimization: GraphOptimizationLevel,
+        options: EngineOptions,
     ) -> Result<Self, String> {
+        let options = options.validate()?;
         let mut builder = Session::builder()
             .map_err(|error| format!("failed to create ONNX Runtime session builder: {error}"))?
-            .with_optimization_level(optimization)
+            .with_optimization_level(options.optimization)
             .map_err(|error| format!("failed to configure graph optimization: {error}"))?;
-        if let Some(threads) = intra_threads {
+        if let Some(threads) = options.intra_threads {
             builder = builder
                 .with_intra_threads(threads)
                 .map_err(|error| format!("failed to configure intra-op threads: {error}"))?;
         }
-        match provider {
+        match options.provider {
             Provider::Cpu => {
                 builder = builder
                     .with_execution_providers([ort::ep::CPU::default().build().error_on_failure()])
@@ -68,6 +98,11 @@ impl OrtEngine {
                         format!("failed to configure CoreML execution provider: {error}")
                     })?;
             }
+        }
+        if options.strict_execution_provider {
+            builder = builder
+                .with_disable_cpu_fallback()
+                .map_err(|error| format!("failed to disable CPU execution fallback: {error}"))?;
         }
         let session = builder
             .commit_from_file(model_file)

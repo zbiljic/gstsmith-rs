@@ -19,6 +19,50 @@ const MODEL_INFO: &str =
     include_str!("../../inference-common/tests/fixtures/identity.onnx.modelinfo");
 const MODEL: &[u8] = include_bytes!("../../inference-common/tests/fixtures/identity.onnx");
 
+// Generated from a minimal ONNX textproto with the repository's Apache-2.0
+// licensed `onnx.proto3` and `protoc --encode=onnx.ModelProto`. A supported
+// 1x1 Conv feeds Erf, which pinned CoreML does not support. This keeps both a
+// CoreML partition and a deterministic CPU-fallback node in the same graph.
+#[cfg(all(feature = "coreml", target_os = "macos"))]
+#[rustfmt::skip]
+const COREML_PARTIAL_MODEL: &[u8] = &[
+    0x08, 0x09, 0x12, 0x1a, 0x67, 0x73, 0x74, 0x73, 0x6d, 0x69, 0x74, 0x68, 0x20, 0x66, 0x69, 0x78,
+    0x74, 0x75, 0x72, 0x65, 0x20, 0x67, 0x65, 0x6e, 0x65, 0x72, 0x61, 0x74, 0x6f, 0x72, 0x3a, 0xd9,
+    0x01, 0x0a, 0x2f, 0x0a, 0x05, 0x69, 0x6e, 0x70, 0x75, 0x74, 0x0a, 0x07, 0x77, 0x65, 0x69,
+    0x67, 0x68, 0x74, 0x73, 0x0a, 0x04, 0x62, 0x69, 0x61, 0x73, 0x12, 0x0b, 0x63, 0x6f, 0x6e,
+    0x76, 0x6f, 0x6c, 0x75, 0x74, 0x69, 0x6f, 0x6e, 0x1a, 0x04, 0x63, 0x6f, 0x6e, 0x76, 0x22,
+    0x04, 0x43, 0x6f, 0x6e, 0x76, 0x0a, 0x1f, 0x0a, 0x0b, 0x63, 0x6f, 0x6e, 0x76, 0x6f, 0x6c,
+    0x75, 0x74, 0x69, 0x6f, 0x6e, 0x12, 0x06, 0x6f, 0x75, 0x74, 0x70, 0x75, 0x74, 0x1a, 0x03,
+    0x65, 0x72, 0x66, 0x22, 0x03, 0x45, 0x72, 0x66, 0x12, 0x0e, 0x63, 0x6f, 0x72, 0x65, 0x6d,
+    0x6c, 0x2d, 0x70, 0x61, 0x72, 0x74, 0x69, 0x61, 0x6c, 0x2a, 0x1f, 0x0a, 0x04, 0x01, 0x03,
+    0x01, 0x01, 0x10, 0x01, 0x22, 0x0c, 0x00, 0x00, 0x80, 0x3f, 0x00, 0x00, 0x00, 0x40, 0x00,
+    0x00, 0x40, 0x40, 0x42, 0x07, 0x77, 0x65, 0x69, 0x67, 0x68, 0x74, 0x73, 0x2a, 0x11, 0x0a,
+    0x01, 0x01, 0x10, 0x01, 0x22, 0x04, 0x00, 0x00, 0x00, 0x3f, 0x42, 0x04, 0x62, 0x69, 0x61,
+    0x73, 0x5a, 0x1f, 0x0a, 0x05, 0x69, 0x6e, 0x70, 0x75, 0x74, 0x12, 0x16, 0x0a, 0x14, 0x08,
+    0x01, 0x12, 0x10, 0x0a, 0x02, 0x08, 0x01, 0x0a, 0x02, 0x08, 0x03, 0x0a, 0x02, 0x08, 0x02,
+    0x0a, 0x02, 0x08, 0x02, 0x62, 0x20, 0x0a, 0x06, 0x6f, 0x75, 0x74, 0x70, 0x75, 0x74, 0x12,
+    0x16, 0x0a, 0x14, 0x08, 0x01, 0x12, 0x10, 0x0a, 0x02, 0x08, 0x01, 0x0a, 0x02, 0x08, 0x01,
+    0x0a, 0x02, 0x08, 0x02, 0x0a, 0x02, 0x08, 0x02, 0x42, 0x02, 0x10, 0x0d,
+];
+
+#[cfg(all(feature = "coreml", target_os = "macos"))]
+const COREML_PARTIAL_MODEL_INFO: &str = "[modelinfo]\n\
+version=1.0\n\
+group-id=gstsmith-coreml-partial-fixture\n\
+\n\
+[input]\n\
+id=image\n\
+type=float32\n\
+dims=1,3,2,2\n\
+dir=input\n\
+ranges=0.0,255.0\n\
+\n\
+[output]\n\
+id=result\n\
+type=float32\n\
+dims=1,1,2,2\n\
+dir=output\n";
+
 fn init() {
     static INIT: Once = Once::new();
     INIT.call_once(|| {
@@ -152,6 +196,48 @@ fn run_factory(
     Ok((output, caps, directory))
 }
 
+#[cfg(all(feature = "coreml", target_os = "macos"))]
+fn run_coreml_fixture(
+    strict: bool,
+) -> Result<(gst::Buffer, tempfile::TempDir), Box<dyn std::error::Error>> {
+    init();
+    let directory = tempfile::tempdir()?;
+    let model = directory.path().join("coreml-conv.onnx");
+    fs::write(
+        &model,
+        include_bytes!("../../tract-inference/tests/fixtures/metal-conv.onnx"),
+    )?;
+    fs::write(
+        directory.path().join("coreml-conv.onnx.modelinfo"),
+        include_str!("../../tract-inference/tests/fixtures/metal-conv.onnx.modelinfo"),
+    )?;
+    let element = gst::ElementFactory::make("ortinference")
+        .property("model-file", model.to_string_lossy().as_ref())
+        .property_from_str("execution-provider", "coreml")
+        .property("strict-execution-provider", strict)
+        .build()?;
+    let caps = gst::Caps::builder("video/x-raw")
+        .field("format", "RGB")
+        .field("width", 2_i32)
+        .field("height", 2_i32)
+        .field("framerate", gst::Fraction::new(1, 1))
+        .build();
+    let mut harness = gst_check::Harness::with_element(&element, Some("sink"), Some("src"));
+    harness.set_src_caps(caps.clone());
+    harness.play();
+    let output = harness.push_and_pull(input_buffer(&caps))?;
+    let tensors = output
+        .meta::<gst_analytics::TensorMeta>()
+        .ok_or_else(|| std::io::Error::other("CoreML output tensor metadata is missing"))?;
+    assert_eq!(tensors.as_slice().len(), 1);
+    let tensor = tensors
+        .as_slice()
+        .first()
+        .ok_or_else(|| std::io::Error::other("CoreML output tensor is missing"))?;
+    assert_eq!(tensor.dims(), [1, 1, 2, 2]);
+    Ok((output, directory))
+}
+
 #[test]
 fn ort_and_tract_factories_have_identical_fixture_contract_and_video_passthrough()
 -> Result<(), Box<dyn std::error::Error>> {
@@ -195,6 +281,76 @@ fn ort_and_tract_factories_have_identical_fixture_contract_and_video_passthrough
     Ok(())
 }
 
+#[cfg(all(feature = "coreml", target_os = "macos"))]
+#[test]
+fn coreml_strict_supported_graph_runs() -> Result<(), Box<dyn std::error::Error>> {
+    let (_output, _directory) = run_coreml_fixture(true)?;
+    Ok(())
+}
+
+#[cfg(all(feature = "coreml", target_os = "macos"))]
+fn partial_coreml_element(
+    strict: bool,
+) -> Result<(gst::Element, tempfile::TempDir), Box<dyn std::error::Error>> {
+    init();
+    let directory = tempfile::tempdir()?;
+    let model = directory.path().join("coreml-partial.onnx");
+    fs::write(&model, COREML_PARTIAL_MODEL)?;
+    fs::write(
+        directory.path().join("coreml-partial.onnx.modelinfo"),
+        COREML_PARTIAL_MODEL_INFO,
+    )?;
+    let element = gst::ElementFactory::make("ortinference")
+        .property("model-file", model.to_string_lossy().as_ref())
+        .property_from_str("execution-provider", "coreml")
+        .property("strict-execution-provider", strict)
+        .build()?;
+    Ok((element, directory))
+}
+
+#[cfg(all(feature = "coreml", target_os = "macos"))]
+#[test]
+fn coreml_partial_graph_uses_default_cpu_fallback() -> Result<(), Box<dyn std::error::Error>> {
+    let (element, _directory) = partial_coreml_element(false)?;
+    let caps = gst::Caps::builder("video/x-raw")
+        .field("format", "RGB")
+        .field("width", 2_i32)
+        .field("height", 2_i32)
+        .field("framerate", gst::Fraction::new(1, 1))
+        .build();
+    let mut harness = gst_check::Harness::with_element(&element, Some("sink"), Some("src"));
+    harness.set_src_caps(caps.clone());
+    harness.play();
+    let output = harness.push_and_pull(input_buffer(&caps))?;
+    assert!(output.meta::<gst_analytics::TensorMeta>().is_some());
+    Ok(())
+}
+
+#[cfg(all(feature = "coreml", target_os = "macos"))]
+#[test]
+fn coreml_partial_graph_fails_when_cpu_fallback_is_disabled()
+-> Result<(), Box<dyn std::error::Error>> {
+    let (element, _directory) = partial_coreml_element(true)?;
+    let pipeline = gst::Pipeline::new();
+    pipeline.add(&element)?;
+    let _startup_error = pipeline
+        .set_state(gst::State::Paused)
+        .expect_err("strict partial CoreML graph must fail startup");
+    let message = pipeline
+        .bus()
+        .ok_or_else(|| std::io::Error::other("pipeline bus is missing"))?
+        .timed_pop_filtered(gst::ClockTime::from_seconds(5), &[gst::MessageType::Error])
+        .ok_or_else(|| std::io::Error::other("strict CoreML startup error is missing"))?;
+    let gst::MessageView::Error(error) = message.view() else {
+        return Err(std::io::Error::other("filtered message was not an error").into());
+    };
+    assert!(error.error().matches(gst::LibraryError::Settings));
+    let details = format!("{} {:?}", error.error(), error.debug());
+    assert!(details.contains("failed to load ONNX model"), "{details}");
+    pipeline.set_state(gst::State::Null)?;
+    Ok(())
+}
+
 #[test]
 fn properties_have_backend_defaults_and_ready_mutability() -> Result<(), Box<dyn std::error::Error>>
 {
@@ -203,12 +359,16 @@ fn properties_have_backend_defaults_and_ready_mutability() -> Result<(), Box<dyn
     assert_eq!(enum_nick(&element, "execution-provider"), "cpu");
     assert_eq!(element.property::<u32>("intra-op-threads"), 0);
     assert_eq!(enum_nick(&element, "graph-optimization"), "level3");
+    assert!(!element.property::<bool>("strict-execution-provider"));
+    element.set_property("strict-execution-provider", true);
+    assert!(element.property::<bool>("strict-execution-provider"));
     for name in [
         "model-file",
         "model-info-file",
         "execution-provider",
         "intra-op-threads",
         "graph-optimization",
+        "strict-execution-provider",
     ] {
         let property = element
             .find_property(name)
@@ -219,6 +379,38 @@ fn properties_have_backend_defaults_and_ready_mutability() -> Result<(), Box<dyn
         );
     }
     Ok(())
+}
+
+fn assert_cpu_strict_rejected() -> Result<(), Box<dyn std::error::Error>> {
+    init();
+    let element = gst::ElementFactory::make("ortinference")
+        .property("strict-execution-provider", true)
+        .build()?;
+    let pipeline = gst::Pipeline::new();
+    pipeline.add(&element)?;
+    let _startup_error = pipeline
+        .set_state(gst::State::Paused)
+        .expect_err("CPU strict mode must fail startup");
+    let message = pipeline
+        .bus()
+        .ok_or_else(|| std::io::Error::other("pipeline bus is missing"))?
+        .timed_pop_filtered(gst::ClockTime::from_seconds(5), &[gst::MessageType::Error])
+        .ok_or_else(|| std::io::Error::other("settings error message is missing"))?;
+    let gst::MessageView::Error(error) = message.view() else {
+        return Err(std::io::Error::other("filtered message was not an error").into());
+    };
+    assert!(error.error().matches(gst::LibraryError::Settings));
+    let details = format!("{} {:?}", error.error(), error.debug());
+    assert!(details.contains("strict-execution-provider"), "{details}");
+    assert!(details.contains("execution-provider=cpu"), "{details}");
+    pipeline.set_state(gst::State::Null)?;
+    Ok(())
+}
+
+#[test]
+fn strict_execution_provider_rejects_cpu_before_model_loading()
+-> Result<(), Box<dyn std::error::Error>> {
+    assert_cpu_strict_rejected()
 }
 
 #[test]
