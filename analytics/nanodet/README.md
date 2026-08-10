@@ -76,3 +76,22 @@ gst-launch-1.0 videotestsrc num-buffers=1 \
 
 Replace `tractinference` with `ortinference` to change runtimes without changing
 the decoder configuration.
+
+## Decoder benchmark
+
+Run the ignored benchmark in release mode to compare FP32 and FP16 decoding for
+all supported contracts with sparse and dense candidate tensors:
+
+```sh
+cargo test -p gst-plugin-nanodet --release benchmark_decoder -- --ignored --nocapture
+```
+
+Override the default 10 warm-up and 100 measured iterations when needed:
+
+```sh
+GSTSMITH_BENCH_WARMUP=25 GSTSMITH_BENCH_ITERATIONS=500 \
+  cargo test -p gst-plugin-nanodet --release benchmark_decoder -- --ignored --nocapture
+```
+
+The benchmark reports decoding and NMS performance by contract, tensor type, and
+candidate density. It excludes inference and analytics metadata attachment.

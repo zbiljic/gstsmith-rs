@@ -272,6 +272,9 @@ fn decode_values<T: Copy>(
 
 #[cfg(test)]
 mod tests {
+    use std::hint::black_box;
+    use std::time::Instant;
+
     use super::*;
 
     #[test]
@@ -346,6 +349,88 @@ mod tests {
         )
         .expect("valid tensor");
         detections
+    }
+
+    fn env_count(name: &str, default: usize) -> usize {
+        std::env::var(name)
+            .ok()
+            .and_then(|value| value.parse().ok())
+            .filter(|value| *value > 0)
+            .unwrap_or(default)
+    }
+
+    fn report_benchmark<T: Copy>(
+        contract: Contract,
+        tensor_type: &str,
+        density: &str,
+        values: &[T],
+        warmup: usize,
+        iterations: usize,
+        decode: impl Fn(&[T], &mut Vec<Detection>) -> Result<(), String>,
+    ) {
+        let mut detections = Vec::new();
+        for _ in 0..warmup {
+            decode(black_box(values), &mut detections).expect("benchmark tensor decodes");
+        }
+
+        let start = Instant::now();
+        for _ in 0..iterations {
+            decode(black_box(values), &mut detections).expect("benchmark tensor decodes");
+            black_box(&detections);
+        }
+        let elapsed = start.elapsed();
+        let sample_count = u32::try_from(iterations).expect("iteration count fits u32");
+        let average = elapsed / sample_count;
+        println!(
+            "model={} type={tensor_type} density={density} points={} detections={} warmup={warmup} iterations={iterations} average={average:?} average_ns={} throughput_fps={:.1}",
+            contract.name,
+            contract.points,
+            detections.len(),
+            average.as_nanos(),
+            1.0 / average.as_secs_f64()
+        );
+    }
+
+    #[test]
+    #[ignore = "run explicitly in release mode with GSTSMITH_BENCH_WARMUP and GSTSMITH_BENCH_ITERATIONS"]
+    fn benchmark_decoder_reports_model_type_and_candidate_density() {
+        let warmup = env_count("GSTSMITH_BENCH_WARMUP", 10);
+        let iterations = env_count("GSTSMITH_BENCH_ITERATIONS", 100);
+
+        for contract in CONTRACTS {
+            for (density, candidate_count) in [("sparse", 8), ("dense", contract.points)] {
+                let mut float32 = output(contract);
+                for candidate in 0..candidate_count {
+                    let point = candidate * contract.points / candidate_count;
+                    set_candidate(&mut float32, point, candidate % NUM_CLASSES, 0.9, 1);
+                }
+                let float16 = float32
+                    .iter()
+                    .map(|value| half::f16::from_f32(*value).to_bits())
+                    .collect::<Vec<_>>();
+
+                report_benchmark(
+                    contract,
+                    "float32",
+                    density,
+                    &float32,
+                    warmup,
+                    iterations,
+                    |values, detections| decode(values, contract, 0.3, 0.6, 100, detections),
+                );
+                report_benchmark(
+                    contract,
+                    "float16",
+                    density,
+                    &float16,
+                    warmup,
+                    iterations,
+                    |values, detections| {
+                        decode_float16(values, contract, 0.3, 0.6, 100, detections)
+                    },
+                );
+            }
+        }
     }
 
     #[test]
