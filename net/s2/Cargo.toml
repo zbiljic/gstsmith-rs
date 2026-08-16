@@ -44,7 +44,7 @@ path = "src/lib.rs"
 
 [dev-dependencies]
 gst-check = { workspace = true }
-s2-testcontainers = "=0.42.5"
+s2-testcontainers = "=0.42.6"
 
 [lints]
 workspace = true
