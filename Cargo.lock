@@ -3085,9 +3085,9 @@ dependencies = [
 
 [[package]]
 name = "s2-sdk"
-version = "0.34.2"
+version = "0.34.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "dce674b2aaa40bdd7ae75cf39363d90b1c99c61e1a422aef278c8c7170eb6c40"
+checksum = "9b6e4ce57507c707f66479473987778e1fd3739c282f58534a6dccdf23305586"
 dependencies = [
  "async-compression",
  "async-stream",

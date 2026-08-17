@@ -27,7 +27,7 @@ requires_private = "gstreamer-1.0, gstreamer-base-1.0, gobject-2.0, glib-2.0, gm
 futures-util = "0.3"
 gst = { workspace = true }
 gst-base = { workspace = true }
-s2-sdk = { version = "=0.34.2", default-features = false, features = ["rustls-ring"] }
+s2-sdk = { version = "=0.34.3", default-features = false, features = ["rustls-ring"] }
 tokio = { version = "1.49", features = ["rt-multi-thread", "sync", "time"] }
 tokio-util = "0.7"
 url = "2.5"
