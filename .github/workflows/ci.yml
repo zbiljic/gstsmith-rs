@@ -118,7 +118,8 @@ jobs:
             -p gst-plugin-console \
             -p gst-plugin-lines \
             -p gst-plugin-nats \
-            -p gst-plugin-s2
+            -p gst-plugin-s2 \
+            -p gst-plugin-vlm
 
       - name: Test GStreamer 1.24 plugins
         run: |
@@ -126,7 +127,8 @@ jobs:
             -p gst-plugin-console \
             -p gst-plugin-lines \
             -p gst-plugin-nats \
-            -p gst-plugin-s2
+            -p gst-plugin-s2 \
+            -p gst-plugin-vlm
 
       - name: Lint GStreamer 1.24 plugins
         run: |
@@ -135,6 +137,7 @@ jobs:
             -p gst-plugin-lines \
             -p gst-plugin-nats \
             -p gst-plugin-s2 \
+            -p gst-plugin-vlm \
             -- -D warnings
 
   checks:
@@ -228,6 +231,13 @@ jobs:
           gst-inspect-1.0 s2
           gst-inspect-1.0 s2src
           gst-inspect-1.0 s2sink
+
+      - name: Inspect VLM plugin
+        env:
+          GST_PLUGIN_PATH: ${{ github.workspace }}/target/debug
+        run: |
+          gst-inspect-1.0 vlm
+          gst-inspect-1.0 vlmanalysis
 
       - name: Inspect Tract inference plugin
         env:
