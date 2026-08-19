@@ -1,0 +1,61 @@
+[package]
+name = "gst-plugin-vlm"
+version = { workspace = true }
+description = "Asynchronous provider-neutral vision-language analysis for JPEG streams."
+authors = { workspace = true }
+edition = { workspace = true }
+rust-version = { workspace = true }
+license = { workspace = true }
+readme = "README.md"
+repository = { workspace = true }
+
+[package.metadata.capi]
+min_version = "0.9.21"
+
+[package.metadata.capi.header]
+enabled = false
+
+[package.metadata.capi.library]
+install_subdir = "gstreamer-1.0"
+versioning = false
+import_library = false
+
+[package.metadata.capi.pkg_config]
+requires_private = "gstreamer-1.0, gstreamer-base-1.0, gobject-2.0, glib-2.0, gmodule-2.0"
+
+[dependencies]
+base64 = "0.22"
+bytes = "1"
+futures-util = "0.3"
+gst = { workspace = true }
+gst-base = { workspace = true }
+reqwest = { version = "0.13", default-features = false, features = ["json", "stream", "rustls-no-provider"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1.49", features = ["io-util", "net", "rt-multi-thread", "sync", "time"] }
+
+[features]
+static = []
+capi = []
+doc = ["gst/v1_24"]
+
+[lib]
+name = "gstvlm"
+crate-type = ["cdylib", "rlib"]
+path = "src/lib.rs"
+
+[dev-dependencies]
+gst-check = { workspace = true }
+http-body-util = "0.1"
+hyper = { version = "1", features = ["http1", "server"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
+rcgen = "0.14.9"
+tempfile = "3.27.0"
+tokio-rustls = "0.26.4"
+
+[lints]
+workspace = true
+
+[build-dependencies]
+gst-plugin-version-helper = { workspace = true }
