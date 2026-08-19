@@ -16,6 +16,10 @@ and elements written in Rust.
 
 - [`analytics`](analytics/)
 
+  - [`vlm`](analytics/vlm/): Asynchronous OpenAI-compatible vision-language
+    analysis for JPEG streams.
+    - `vlmanalysis`: Sample JPEG frames for ordered background analysis while
+      passing every buffer downstream unchanged.
   - [`inference-common`](analytics/inference-common/): Shared model-info,
     preprocessing, caps, and tensor metadata contract for inference plugins.
   - [`nanodet`](analytics/nanodet/): NanoDet-m and NanoDet-Plus tensor decoding.
