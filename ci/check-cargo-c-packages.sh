@@ -34,6 +34,7 @@ packages=(
   "gst-plugin-nats|gstnats|nats|natssrc natssink"
   "gst-plugin-s2|gsts2|s2|s2src s2sink"
   "gst-plugin-vlm|gstvlm|vlm|vlmanalysis"
+  "gst-plugin-ocrs|gstocrs|ocrs|ocrsanalysis"
   "gst-plugin-tract-inference|gsttractinference|tractinference|tractinference"
   "gst-plugin-ort-inference|gstortinference|ortinference|ortinference"
   "gst-plugin-nanodet|gstnanodet|nanodet|nanodettensordec"
@@ -82,12 +83,12 @@ shopt -s nullglob
 dynamic_files=("$plugin_dir"/lib*."$dynamic_suffix")
 static_files=("$plugin_dir"/lib*.a)
 pc_files=("$pc_dir"/*.pc)
-test "${#dynamic_files[@]}" -eq 8 ||
-  fail "expected exactly 8 dynamic plugin libraries, found ${#dynamic_files[@]}"
-test "${#static_files[@]}" -eq 8 ||
-  fail "expected exactly 8 static plugin archives, found ${#static_files[@]}"
-test "${#pc_files[@]}" -eq 8 ||
-  fail "expected exactly 8 pkg-config modules, found ${#pc_files[@]}"
+test "${#dynamic_files[@]}" -eq 9 ||
+  fail "expected exactly 9 dynamic plugin libraries, found ${#dynamic_files[@]}"
+test "${#static_files[@]}" -eq 9 ||
+  fail "expected exactly 9 static plugin archives, found ${#static_files[@]}"
+test "${#pc_files[@]}" -eq 9 ||
+  fail "expected exactly 9 pkg-config modules, found ${#pc_files[@]}"
 
 unset PKG_CONFIG_LIBDIR
 export PKG_CONFIG_PATH="$pc_dir"
@@ -222,4 +223,4 @@ done
 
 printf 'Validated dynamic plugins: %s\n' "${plugin_names[*]}"
 printf 'Validated pkg-config modules: %s\n' "${modules[*]}"
-printf 'Validated 8 static archives with one static consumer per plugin\n'
+printf 'Validated 9 static archives with one static consumer per plugin\n'

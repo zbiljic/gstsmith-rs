@@ -119,7 +119,8 @@ jobs:
             -p gst-plugin-lines \
             -p gst-plugin-nats \
             -p gst-plugin-s2 \
-            -p gst-plugin-vlm
+            -p gst-plugin-vlm \
+            -p gst-plugin-ocrs
 
       - name: Test GStreamer 1.24 plugins
         run: |
@@ -128,7 +129,8 @@ jobs:
             -p gst-plugin-lines \
             -p gst-plugin-nats \
             -p gst-plugin-s2 \
-            -p gst-plugin-vlm
+            -p gst-plugin-vlm \
+            -p gst-plugin-ocrs
 
       - name: Lint GStreamer 1.24 plugins
         run: |
@@ -138,6 +140,7 @@ jobs:
             -p gst-plugin-nats \
             -p gst-plugin-s2 \
             -p gst-plugin-vlm \
+            -p gst-plugin-ocrs \
             -- -D warnings
 
   checks:
@@ -238,6 +241,13 @@ jobs:
         run: |
           gst-inspect-1.0 vlm
           gst-inspect-1.0 vlmanalysis
+
+      - name: Inspect OCRs plugin
+        env:
+          GST_PLUGIN_PATH: ${{ github.workspace }}/target/debug
+        run: |
+          gst-inspect-1.0 ocrs
+          gst-inspect-1.0 ocrsanalysis
 
       - name: Inspect Tract inference plugin
         env:
