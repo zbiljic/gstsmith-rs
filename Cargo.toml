@@ -2,6 +2,7 @@
 members = [
     "analytics/inference-common",
     "analytics/nanodet",
+    "analytics/ocrs",
     "analytics/ort-inference",
     "analytics/tract-inference",
     "analytics/vlm",
@@ -28,6 +29,9 @@ gst-base = { package = "gstreamer-base", version = "0.25.3", features = ["v1_24"
 gst-check = { package = "gstreamer-check", version = "0.25.0", features = ["v1_24"] }
 gst-plugin-version-helper = "0.8.4"
 gst-video = { package = "gstreamer-video", version = "0.25.3", features = ["v1_24"] }
+ocrs = "=0.12.2"
+rten = { version = "=0.24.0", default-features = false, features = ["rten_format"] }
+rten-imageproc = "=0.24.0"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
