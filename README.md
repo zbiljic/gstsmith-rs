@@ -16,6 +16,9 @@ and elements written in Rust.
 
 - [`analytics`](analytics/)
 
+  - [`ocrs`](analytics/ocrs/): Local frame-correlated OCRs analysis for RGB video.
+    - `ocrsanalysis`: Sample RGB frames for local bus-message OCR while passing
+      every buffer downstream unchanged.
   - [`vlm`](analytics/vlm/): Asynchronous OpenAI-compatible vision-language
     analysis for JPEG streams.
     - `vlmanalysis`: Sample JPEG frames for ordered background analysis while
