@@ -62,13 +62,18 @@ and elements written in Rust.
     exposed in OpenMetrics format.
     - `prometheus`: Observe pipelines through tracer hooks and serve metrics
       without modifying their graphs.
+  - [`statsd`](utils/statsd/): Bounded process-wide GStreamer metrics pushed
+    over UDP with DogStatsD-compatible tags.
+    - `statsd`: Observe pipelines through tracer hooks and periodically emit
+      StatsD counters and gauges.
 
 ## Building
 
 Building the full workspace requires GStreamer 1.28 or newer because the
 inference plugins use the 1.28 tensor-group contract required by
-`tensordecodebin`. The console, lines, NATS, Prometheus, and S2 plugins remain
-independently buildable against GStreamer 1.24. CI verifies both baselines.
+`tensordecodebin`. The console, lines, NATS, Prometheus, S2, and StatsD plugins
+remain independently buildable against GStreamer 1.24. CI verifies both
+baselines.
 
 Development requires the relevant GStreamer headers and pkg-config files, the
 base runtime plugins, and the `gst-inspect-1.0` and `gst-launch-1.0`
