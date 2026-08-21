@@ -40,6 +40,13 @@ name = "gststatsd"
 crate-type = ["cdylib", "rlib"]
 path = "src/lib.rs"
 
+[dev-dependencies]
+criterion = "0.7"
+
+[[bench]]
+name = "hot_path"
+harness = false
+
 [lints]
 workspace = true
 

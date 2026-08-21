@@ -1549,6 +1549,7 @@ name = "gst-plugin-statsd"
 version = "0.1.0"
 dependencies = [
  "cadence",
+ "criterion",
  "gst-plugin-version-helper",
  "gstreamer",
  "papaya",
