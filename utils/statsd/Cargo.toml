@@ -41,7 +41,7 @@ crate-type = ["cdylib", "rlib"]
 path = "src/lib.rs"
 
 [dev-dependencies]
-criterion = "0.7"
+criterion = "0.8"
 
 [[bench]]
 name = "hot_path"
