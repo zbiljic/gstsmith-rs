@@ -10,6 +10,7 @@ members = [
     "net/nats",
     "net/s2",
     "text/lines",
+    "utils/prometheus",
 ]
 resolver = "3"
 
