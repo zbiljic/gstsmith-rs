@@ -1499,7 +1499,7 @@ dependencies = [
  "gstreamer-check",
  "gstreamer-video",
  "ocrs",
- "rten",
+ "rten 0.25.0",
  "rten-imageproc 0.25.0",
  "tempfile",
 ]
@@ -2635,7 +2635,7 @@ checksum = "a5379fdd3f11522b5a2ff53017a189463dabf5d0a9c915cb3eb97fabec4ea11c"
 dependencies = [
  "anyhow",
  "rayon",
- "rten",
+ "rten 0.24.0",
  "rten-imageproc 0.24.0",
  "rten-tensor 0.24.0",
  "thiserror",
@@ -3371,12 +3371,35 @@ dependencies = [
  "num_cpus",
  "rayon",
  "rten-base 0.24.0",
- "rten-gemm",
- "rten-model-file",
- "rten-shape-inference",
- "rten-simd",
+ "rten-gemm 0.24.0",
+ "rten-model-file 0.24.0",
+ "rten-shape-inference 0.24.0",
+ "rten-simd 0.24.0",
  "rten-tensor 0.24.0",
- "rten-vecmath",
+ "rten-vecmath 0.24.0",
+ "rustc-hash",
+ "smallvec",
+ "typeid",
+ "wasm-bindgen",
+]
+
+[[package]]
+name = "rten"
+version = "0.25.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0d0ccac21a69093433be18ef1597fbeb53ca6f9fa1d2ed413a3258fc320c43c7"
+dependencies = [
+ "flatbuffers",
+ "num_cpus",
+ "rayon",
+ "rten-base 0.25.0",
+ "rten-gemm 0.25.0",
+ "rten-model-file 0.25.0",
+ "rten-parallel",
+ "rten-shape-inference 0.25.0",
+ "rten-simd 0.25.0",
+ "rten-tensor 0.25.0",
+ "rten-vecmath 0.25.0",
  "rustc-hash",
  "smallvec",
  "typeid",
@@ -3406,8 +3429,21 @@ checksum = "330a81a0ca209fb5ce21bd17efa0bd287d5881c6cebfbff0b21c4294a1a14a9e"
 dependencies = [
  "rayon",
  "rten-base 0.24.0",
- "rten-simd",
+ "rten-simd 0.24.0",
  "rten-tensor 0.24.0",
+]
+
+[[package]]
+name = "rten-gemm"
+version = "0.25.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8e0156f319d872aaa72c86bae71201f4050b2c2f26bb10c5f5231699a30d93ae"
+dependencies = [
+ "rayon",
+ "rten-base 0.25.0",
+ "rten-parallel",
+ "rten-simd 0.25.0",
+ "rten-tensor 0.25.0",
 ]
 
 [[package]]
@@ -3439,6 +3475,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "rten-model-file"
+version = "0.25.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1910628a8b6e19c158da6bfea6793ee8b6a685a70b5d07f74595be2a24df7943"
+dependencies = [
+ "flatbuffers",
+ "rten-base 0.25.0",
+]
+
+[[package]]
 name = "rten-parallel"
 version = "0.25.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3459,10 +3505,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "rten-shape-inference"
+version = "0.25.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a74673d8cafff2c09a9b7153a5dd6c2012f158ca5027736b7e2efc4cfb608a2e"
+dependencies = [
+ "rten-tensor 0.25.0",
+ "smallvec",
+]
+
+[[package]]
 name = "rten-simd"
 version = "0.24.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b19a0032dfcb70dd20960c1c51a37674b237586cbc1ce586f45b46605d108e82"
+
+[[package]]
+name = "rten-simd"
+version = "0.25.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b5b7fa7c387ec732563348c923e5a0442e3a2a0977b380b90173e5cf2b50aae1"
 
 [[package]]
 name = "rten-tensor"
@@ -3496,7 +3558,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9574ddebf5671bc08ceb76e2e1638fadc57fdeff318634eab2c29e9a803cff64"
 dependencies = [
  "rten-base 0.24.0",
- "rten-simd",
+ "rten-simd 0.24.0",
+]
+
+[[package]]
+name = "rten-vecmath"
+version = "0.25.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4e23394efe6b6b5e439ea7b12fb66900dfecbbb8841bfb7917113286fd291f29"
+dependencies = [
+ "rten-base 0.25.0",
+ "rten-simd 0.25.0",
 ]
 
 [[package]]
