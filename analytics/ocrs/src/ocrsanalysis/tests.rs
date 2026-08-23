@@ -553,6 +553,9 @@ fn worker_ordinary_failure_recovers_for_the_next_selected_job() {
             .recv_timeout(Duration::from_secs(1))
             .expect("second backend call")
     );
+    assert!(wait_until(Duration::from_secs(1), || {
+        element.property::<u64>("completed-frames") == 1
+    }));
     assert_eq!(element.property::<u64>("failed-frames"), 1);
     assert_eq!(element.property::<u64>("completed-frames"), 1);
     BaseTransformImpl::stop(element.imp()).expect("stopping recovered worker");
@@ -602,6 +605,15 @@ fn worker_dependency_panic_is_contained_and_posts_one_fatal_error() {
         bus.timed_pop_filtered(gst::ClockTime::ZERO, &[gst::MessageType::Element])
             .is_none()
     );
+    assert!(wait_until(Duration::from_secs(1), || {
+        element
+            .imp()
+            .state
+            .lock()
+            .expect("locking failed worker state")
+            .as_ref()
+            .is_some_and(|worker| worker.handle.is_finished())
+    }));
     assert_eq!(
         BaseTransformImpl::transform_ip_passthrough(element.imp(), &rgb_buffer(1)),
         Err(gst::FlowError::Flushing)
