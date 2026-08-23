@@ -128,8 +128,10 @@ fn tensor_values(tensor: &gst_analytics::Tensor) -> Vec<f32> {
         .map_readable()
         .expect("mapping tensor data")
         .as_slice()
-        .chunks_exact(4)
-        .map(|chunk| f32::from_le_bytes(chunk.try_into().expect("f32 tensor chunk")))
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|chunk| f32::from_le_bytes(*chunk))
         .collect()
 }
 

@@ -100,7 +100,7 @@ struct ParsedMetric {
 }
 
 fn parse_metric(line: &str) -> Option<ParsedMetric> {
-    let (metric, raw_tags) = line.split_once("|#").map_or((line, ""), |parts| parts);
+    let (metric, raw_tags) = line.split_once("|#").unwrap_or((line, ""));
     let (name, rest) = metric.split_once(':')?;
     let (value, metric_type) = rest.split_once('|')?;
     let tags = raw_tags

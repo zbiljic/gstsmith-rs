@@ -383,12 +383,14 @@ mod tests {
                 std::io::Error::other("Tract output order did not match model-info").into(),
             );
         }
-        let values: Result<Vec<_>, _> = first
+        let values: Vec<_> = first
             .bytes
-            .chunks_exact(4)
-            .map(|chunk| <[u8; 4]>::try_from(chunk).map(f32::from_le_bytes))
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|chunk| f32::from_le_bytes(*chunk))
             .collect();
-        if values? != [1.0, 2.0, 3.0, 4.0, 5.0, 6.0] {
+        if values != [1.0, 2.0, 3.0, 4.0, 5.0, 6.0] {
             return Err(
                 std::io::Error::other("Tract identity output values were incorrect").into(),
             );

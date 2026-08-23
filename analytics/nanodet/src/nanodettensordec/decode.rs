@@ -178,7 +178,7 @@ fn decode_values<T: Copy>(
     if candidates.capacity() < initial_capacity {
         candidates.reserve(initial_capacity);
     }
-    let mut rows = output.chunks_exact(CHANNELS);
+    let mut rows = output.as_chunks::<CHANNELS>().0.iter();
     let mut point = 0usize;
     #[expect(
         clippy::cast_precision_loss,
