@@ -5,11 +5,15 @@
 )]
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::sync::Once;
+use std::sync::{Mutex, Once};
 use std::time::{Duration, Instant};
 use std::{path::Path, process::Command};
 
 use gst::prelude::*;
+
+// Tracer hooks share process-global GStreamer state and cannot be registered or removed safely by
+// multiple tests at once, particularly with older supported GStreamer releases.
+static TRACER_TEST_LOCK: Mutex<()> = Mutex::new(());
 
 #[expect(
     clippy::expect_used,
@@ -233,6 +237,9 @@ fn assert_reference_metrics(payload: &str) {
 #[test]
 fn reference_pipeline_exports_counters_and_gauges() {
     init();
+    let _guard = TRACER_TEST_LOCK
+        .lock()
+        .expect("locking global tracer test state");
     let (socket, destination) = loopback();
     let tracer = gst::glib::Object::builder::<gststatsd::statsd::StatsdTracer>()
         .property("destination", &destination)
@@ -269,6 +276,9 @@ fn reference_pipeline_exports_counters_and_gauges() {
 #[test]
 fn series_limit_pipeline_is_bounded() {
     init();
+    let _guard = TRACER_TEST_LOCK
+        .lock()
+        .expect("locking global tracer test state");
     let (socket, destination) = loopback();
     let tracer = gst::glib::Object::builder::<gststatsd::statsd::StatsdTracer>()
         .property("destination", &destination)
@@ -335,6 +345,9 @@ fn series_limit_pipeline_is_bounded() {
 #[test]
 fn unavailable_receiver_does_not_block_shutdown() {
     init();
+    let _guard = TRACER_TEST_LOCK
+        .lock()
+        .expect("locking global tracer test state");
     let tracer = gst::glib::Object::builder::<gststatsd::statsd::StatsdTracer>()
         .property("destination", "127.0.0.1:9")
         .property("flush-interval-ms", 100_u32)
