@@ -1080,7 +1080,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -1374,7 +1374,7 @@ dependencies = [
  "gobject-sys",
  "libc",
  "system-deps",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -1500,7 +1500,7 @@ dependencies = [
  "gstreamer-video",
  "ocrs",
  "rten",
- "rten-imageproc",
+ "rten-imageproc 0.26.0",
  "tempfile",
 ]
 
@@ -2635,8 +2635,8 @@ dependencies = [
  "anyhow",
  "rayon",
  "rten",
- "rten-imageproc",
- "rten-tensor",
+ "rten-imageproc 0.25.0",
+ "rten-tensor 0.25.0",
  "thiserror",
  "wasm-bindgen",
 ]
@@ -3089,7 +3089,7 @@ dependencies = [
  "once_cell",
  "socket2",
  "tracing",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -3369,13 +3369,13 @@ dependencies = [
  "flatbuffers",
  "num_cpus",
  "rayon",
- "rten-base",
+ "rten-base 0.25.0",
  "rten-gemm",
  "rten-model-file",
- "rten-parallel",
+ "rten-parallel 0.25.0",
  "rten-shape-inference",
  "rten-simd",
- "rten-tensor",
+ "rten-tensor 0.25.0",
  "rten-vecmath",
  "rustc-hash",
  "smallvec",
@@ -3390,16 +3390,22 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3ce2e99d0a7cdd93ba73668dfa87d682ee3250c297afb8da83304678109e14f7"
 
 [[package]]
+name = "rten-base"
+version = "0.26.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "413dc975c7a3d0e6da0b146cd0387e3d389cceab0fc48328bfa716c7f2ae1b1e"
+
+[[package]]
 name = "rten-gemm"
 version = "0.25.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8e0156f319d872aaa72c86bae71201f4050b2c2f26bb10c5f5231699a30d93ae"
 dependencies = [
  "rayon",
- "rten-base",
- "rten-parallel",
+ "rten-base 0.25.0",
+ "rten-parallel 0.25.0",
  "rten-simd",
- "rten-tensor",
+ "rten-tensor 0.25.0",
 ]
 
 [[package]]
@@ -3408,7 +3414,16 @@ version = "0.25.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "51f9a2791b94f9c9d8b5b22a1944c0e4915131e0ff4376c60ddcd39f09277832"
 dependencies = [
- "rten-tensor",
+ "rten-tensor 0.25.0",
+]
+
+[[package]]
+name = "rten-imageproc"
+version = "0.26.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "18726eae9614e23a400560eb3a5e3fdb06526914c31aadaf767f14afde7680dd"
+dependencies = [
+ "rten-tensor 0.26.0",
 ]
 
 [[package]]
@@ -3418,7 +3433,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1910628a8b6e19c158da6bfea6793ee8b6a685a70b5d07f74595be2a24df7943"
 dependencies = [
  "flatbuffers",
- "rten-base",
+ "rten-base 0.25.0",
 ]
 
 [[package]]
@@ -3428,7 +3443,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e1269349c08f33c9f897009dd79be1f3582f17e5127544484c913286a4e4ed97"
 dependencies = [
  "rayon",
- "rten-base",
+ "rten-base 0.25.0",
+]
+
+[[package]]
+name = "rten-parallel"
+version = "0.26.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ba9075b130f81df7be82496ea3a9bbf20fe9e75f106a22b0ece8700850f8f664"
+dependencies = [
+ "rayon",
+ "rten-base 0.26.0",
 ]
 
 [[package]]
@@ -3437,7 +3462,7 @@ version = "0.25.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a74673d8cafff2c09a9b7153a5dd6c2012f158ca5027736b7e2efc4cfb608a2e"
 dependencies = [
- "rten-tensor",
+ "rten-tensor 0.25.0",
  "smallvec",
 ]
 
@@ -3454,8 +3479,21 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "fabd83fb0fefd42763ceb5fd9635b7ce94aac10c577274a24ae94ff8e9f4565b"
 dependencies = [
  "rayon",
- "rten-base",
- "rten-parallel",
+ "rten-base 0.25.0",
+ "rten-parallel 0.25.0",
+ "smallvec",
+ "typeid",
+]
+
+[[package]]
+name = "rten-tensor"
+version = "0.26.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cf72556ba231d7af50238d26dd264856a2149c6369694eb79b22644c8280c81b"
+dependencies = [
+ "rayon",
+ "rten-base 0.26.0",
+ "rten-parallel 0.26.0",
  "smallvec",
  "typeid",
 ]
@@ -3466,7 +3504,7 @@ version = "0.25.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4e23394efe6b6b5e439ea7b12fb66900dfecbbb8841bfb7917113286fd291f29"
 dependencies = [
- "rten-base",
+ "rten-base 0.25.0",
  "rten-simd",
 ]
 
@@ -3518,7 +3556,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -3577,7 +3615,7 @@ dependencies = [
  "security-framework",
  "security-framework-sys",
  "webpki-root-certs",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -3816,7 +3854,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5b55fb86dfd3a2f5f76ea78310a88f96c4ea21a3031f8d212443d56123fd0521"
 dependencies = [
  "libc",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -4212,7 +4250,7 @@ dependencies = [
  "getrandom 0.4.3",
  "once_cell",
  "rustix",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -5137,7 +5175,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
