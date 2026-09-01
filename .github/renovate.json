@@ -38,6 +38,11 @@
       "description": ["Use ci semantic type for workflow files"],
       "matchFileNames": [".github/workflows/**"],
       "semanticCommitType": "ci"
+    },
+    {
+      "description": ["Keep OCRs and RTen workspace crates compatible"],
+      "matchPackageNames": ["ocrs", "rten", "rten-imageproc"],
+      "groupName": "OCRs and RTen workspace crates"
     }
   ]
 }
