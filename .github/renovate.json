@@ -9,7 +9,6 @@
   ],
   "enabledManagers": ["cargo", "custom.regex", "github-actions", "mise"],
   "minimumReleaseAge": "3 days",
-  "prConcurrentLimit": 1,
   "customManagers": [
     {
       "customType": "regex",
