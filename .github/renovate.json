@@ -9,6 +9,7 @@
   ],
   "enabledManagers": ["cargo", "custom.regex", "github-actions", "mise"],
   "minimumReleaseAge": "3 days",
+  "prConcurrentLimit": 1,
   "customManagers": [
     {
       "customType": "regex",
@@ -22,6 +23,11 @@
     }
   ],
   "packageRules": [
+    {
+      "description": ["Keep RTen workspace crates on the same release"],
+      "matchPackageNames": ["rten", "rten-imageproc"],
+      "groupName": "RTen workspace crates"
+    },
     {
       "description": ["Automerge non-major updates"],
       "matchUpdateTypes": ["minor", "patch", "pin", "digest"],
