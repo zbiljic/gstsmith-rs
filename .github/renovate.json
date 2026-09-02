@@ -40,6 +40,11 @@
       "semanticCommitType": "ci"
     },
     {
+      "description": ["Do not require release age for dependency pins"],
+      "matchUpdateTypes": ["pin"],
+      "minimumReleaseAge": null
+    },
+    {
       "description": ["Keep Tract workspace crates compatible"],
       "matchManagers": ["cargo"],
       "matchSourceUrls": ["https://github.com/snipsco/tract"],
