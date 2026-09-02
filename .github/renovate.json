@@ -40,6 +40,13 @@
       "semanticCommitType": "ci"
     },
     {
+      "description": ["Keep Tract workspace crates compatible"],
+      "matchManagers": ["cargo"],
+      "matchSourceUrls": ["https://github.com/snipsco/tract"],
+      "groupName": "Tract workspace crates",
+      "rangeStrategy": "pin"
+    },
+    {
       "description": ["Keep OCRs and RTen workspace crates compatible"],
       "matchPackageNames": ["ocrs", "rten", "rten-imageproc"],
       "groupName": "OCRs and RTen workspace crates"
