@@ -29,10 +29,10 @@ gst-analytics = { workspace = true, features = ["v1_28"] }
 gst-base = { workspace = true, features = ["v1_28"] }
 gst-inference-common = { path = "../inference-common" }
 gst-video = { workspace = true, features = ["v1_28"] }
-tract-onnx = { version = "=0.23.5", optional = true }
+tract-onnx = { version = "=0.23.6", optional = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]
-tract-metal = { version = "=0.23.5", optional = true }
+tract-metal = { version = "=0.23.6", optional = true }
 
 [features]
 default = ["tract"]
