@@ -233,9 +233,9 @@ The fencing token and enabled match-sequence condition are both configured on
 the producer and may apply together; metadata never supplies either
 precondition. A failed precondition terminates the sink worker. A successful
 `render` confirms only admission to the `queue-capacity` queue. Successful EOS
-or normal stop closes the producer and waits for all submission tickets;
-timeout or worker failure reports an error, and accepted records may remain
-unconfirmed.
+waits for all preceding records to be acknowledged; normal stop also closes
+the producer. Timeout or worker failure reports an error, and accepted records
+may remain unconfirmed.
 
 This design was informed by the public S2 behavior in Bento. No Bento code was
 copied; its application-level batch acknowledgement and multi-stream cache

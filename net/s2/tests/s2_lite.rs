@@ -441,6 +441,67 @@ fn sink_source_round_trip_durability_metadata_and_command_rejection() {
 
 #[test]
 #[ignore = "requires Docker and the pinned S2 Lite image"]
+fn eos_flush_stop_resumes_the_same_producer() {
+    common::init();
+    let runtime = runtime();
+    let _runtime_guard = runtime.enter();
+    let lite = runtime.block_on(S2Lite::start()).expect("starting S2 Lite");
+    let client = lite.client().expect("S2 Lite client");
+    let (basin_name, stream_name) = unique_names("eos-resume");
+    ensure_stream(&runtime, &client, &basin_name, &stream_name);
+    let token = token_file("eos-resume");
+
+    let sink = common::element("s2sink");
+    configure(&sink, &lite, &basin_name, &stream_name, &token);
+    sink.set_property("match-seq-num-enabled", true);
+    sink.set_property("match-seq-num", 0_u64);
+    sink.set_property("batch-linger", 5_000_000_000_u64);
+    sink.set_property("shutdown-timeout", 2_000_000_000_u64);
+    let mut harness = sink_harness(&sink, "eos-resume-input");
+
+    for value in 0_u8..3 {
+        harness
+            .push(gst::Buffer::from_mut_slice(vec![value]))
+            .expect("accepting record after EOS and flush");
+        assert!(
+            harness.push_event(gst::event::Eos::new()),
+            "EOS must make the partial batch durable before the linger timeout"
+        );
+        let records = runtime
+            .block_on(
+                client
+                    .basin(basin_name.clone())
+                    .stream(stream_name.clone())
+                    .read(
+                        ReadInput::new().with_stop(
+                            ReadStop::new()
+                                .with_limits(ReadLimits::new().with_count(usize::from(value) + 1)),
+                        ),
+                    ),
+            )
+            .expect("reading records acknowledged before EOS");
+        assert_eq!(
+            records
+                .records
+                .iter()
+                .map(|record| record.body.to_vec())
+                .collect::<Vec<_>>(),
+            (0..=value).map(|byte| vec![byte]).collect::<Vec<_>>()
+        );
+
+        assert!(harness.push_event(gst::event::FlushStart::new()));
+        assert!(harness.push_event(gst::event::FlushStop::new(true)));
+        let segment = gst::FormattedSegment::<gst::ClockTime>::new();
+        assert!(harness.push_event(gst::event::Segment::new(&segment)));
+    }
+
+    drop(harness);
+    std::fs::remove_file(token).expect("removing access-token file");
+    stop_lite(&runtime, lite);
+}
+
+#[test]
+#[ignore = "requires Docker and the pinned S2 Lite image"]
 fn normal_stop_drains_accepted_records() {
     common::init();
     let runtime = runtime();
