@@ -1,8 +1,10 @@
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Duration;
 
 use gst::glib;
 use gst::prelude::*;
+use tokio_util::sync::CancellationToken;
 
 pub const DEFAULT_SERVERS: &str = "nats://127.0.0.1:4222";
 pub const DEFAULT_CONNECTION_TIMEOUT: u64 = 5_000_000_000;
@@ -278,14 +280,18 @@ impl ConnectionSettings {
 pub fn observe_events<T>(
     options: async_nats::ConnectOptions,
     weak: glib::WeakRef<T>,
+    rejected: &Arc<CancellationToken>,
 ) -> async_nats::ConnectOptions
 where
     T: glib::object::ObjectType + IsA<gst::Element> + Send + Sync + 'static,
 {
+    // Ignore callbacks after the corresponding run has been stopped.
+    let rejected = Arc::downgrade(rejected);
     options.event_callback(move |event| {
         let element = weak.upgrade();
+        let rejected = rejected.upgrade();
         async move {
-            let Some(element) = element else {
+            let (Some(element), Some(rejected)) = (element, rejected) else {
                 return;
             };
             match event {
@@ -327,6 +333,16 @@ where
                         "Core NATS reported a slow subscription consumer"
                     );
                 }
+                async_nats::Event::ServerError(error) if is_permission_error(&error) => {
+                    if !rejected.is_cancelled() {
+                        rejected.cancel();
+                        gst::element_error!(
+                            element,
+                            gst::ResourceError::NotAuthorized,
+                            ["Core NATS server denied permission for an operation"]
+                        );
+                    }
+                }
                 async_nats::Event::ServerError(_) => {
                     gst::warning!(
                         gst::CAT_RUST,
@@ -344,6 +360,16 @@ where
             }
         }
     })
+}
+
+fn is_permission_error(error: &async_nats::ServerError) -> bool {
+    match error {
+        async_nats::ServerError::AuthorizationViolation => true,
+        async_nats::ServerError::Other(detail) => detail
+            .to_ascii_lowercase()
+            .starts_with("permissions violation for "),
+        async_nats::ServerError::SlowConsumer(_) => false,
+    }
 }
 
 pub struct ValidatedConnection {
@@ -368,6 +394,28 @@ fn validate_readable(path: Option<&str>, property: &str) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn permission_errors_are_distinct_from_recoverable_server_events() {
+        assert!(is_permission_error(
+            &async_nats::ServerError::AuthorizationViolation
+        ));
+        for detail in [
+            "Permissions Violation for Publish to \"private\"",
+            "Permissions Violation for Subscription to \"private\"",
+            "permissions violation for subscription to \"private\" using queue \"workers\"",
+        ] {
+            assert!(is_permission_error(&async_nats::ServerError::Other(
+                detail.to_owned()
+            )));
+        }
+        assert!(!is_permission_error(&async_nats::ServerError::Other(
+            "Stale Connection".to_owned()
+        )));
+        assert!(!is_permission_error(
+            &async_nats::ServerError::SlowConsumer(1)
+        ));
+    }
 
     #[test]
     fn defaults_validate() {

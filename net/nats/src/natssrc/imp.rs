@@ -1,4 +1,4 @@
-use std::sync::{LazyLock, Mutex, MutexGuard};
+use std::sync::{Arc, LazyLock, Mutex, MutexGuard};
 
 use futures_util::StreamExt;
 use gst::glib;
@@ -51,9 +51,10 @@ enum State {
     #[default]
     Stopped,
     Started {
-        client: async_nats::Client,
+        client: Box<async_nats::Client>,
         subscriber: Option<async_nats::Subscriber>,
         cancel: CancellationToken,
+        rejected: Arc<CancellationToken>,
         timeout: std::time::Duration,
     },
 }
@@ -230,7 +231,8 @@ impl BaseSrcImpl for NatsSrc {
             .connection
             .options(&validated, self.obj().name().as_str(), capacity)
             .map_err(Self::settings_error)?;
-        let options = crate::connection::observe_events(options, self.obj().downgrade());
+        let rejected = Arc::new(CancellationToken::new());
+        let options = crate::connection::observe_events(options, self.obj().downgrade(), &rejected);
         let runtime = runtime::runtime().map_err(Self::settings_error)?;
         let subject = settings.subject.clone();
         let queue_group = settings.queue_group.clone();
@@ -262,9 +264,10 @@ impl BaseSrcImpl for NatsSrc {
                 .map_err(|error| Self::settings_error(format!("failed to set caps: {error}")))?;
         }
         *self.state() = State::Started {
-            client,
+            client: Box::new(client),
             subscriber: Some(subscriber),
             cancel: CancellationToken::new(),
+            rejected,
             timeout: validated.timeout,
         };
         Ok(())
@@ -277,6 +280,7 @@ impl BaseSrcImpl for NatsSrc {
             mut subscriber,
             cancel,
             timeout,
+            ..
         } = old_state
         {
             cancel.cancel();
@@ -318,14 +322,18 @@ impl PushSrcImpl for NatsSrc {
         &self,
         _buffer: Option<&mut gst::BufferRef>,
     ) -> Result<CreateSuccess, gst::FlowError> {
-        let (mut subscriber, cancel) = {
+        let (mut subscriber, cancel, rejected) = {
             let mut state = self.state();
             match &mut *state {
                 State::Started {
-                    subscriber, cancel, ..
+                    subscriber,
+                    cancel,
+                    rejected,
+                    ..
                 } => (
                     subscriber.take().ok_or(gst::FlowError::Error)?,
                     cancel.clone(),
+                    Arc::clone(rejected),
                 ),
                 State::Stopped => return Err(gst::FlowError::Flushing),
             }
@@ -335,7 +343,9 @@ impl PushSrcImpl for NatsSrc {
             gst::element_imp_error!(self, gst::ResourceError::Failed, ["{error}"]);
             gst::FlowError::Error
         })?;
-        let next = runtime.block_on(wait_or_cancel(&cancel, subscriber.next()));
+        let next = runtime
+            .block_on(rejected.run_until_cancelled(wait_or_cancel(&cancel, subscriber.next())))
+            .flatten();
 
         let unclaimed_subscriber = {
             let mut state = self.state();
@@ -354,6 +364,9 @@ impl PushSrcImpl for NatsSrc {
                 let _unsubscribe_result = subscriber.unsubscribe().await;
             });
             return Err(gst::FlowError::Flushing);
+        }
+        if rejected.is_cancelled() {
+            return Err(gst::FlowError::Error);
         }
         if cancel.is_cancelled() {
             return Err(gst::FlowError::Flushing);

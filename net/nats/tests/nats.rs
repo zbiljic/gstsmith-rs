@@ -4,8 +4,10 @@
 )]
 
 use std::sync::Once;
+use std::time::Duration;
 
 use gst::prelude::*;
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt};
 
 fn init() {
     static INIT: Once = Once::new();
@@ -272,4 +274,111 @@ fn nats_custom_meta_preserves_duplicate_headers_on_copy() {
         .get::<gst::Array>("headers")
         .expect("headers are an array");
     assert_eq!(headers.len(), 2);
+}
+
+fn permission_denying_server(
+    runtime: &tokio::runtime::Runtime,
+) -> (String, tokio::task::JoinHandle<()>) {
+    let listener = runtime
+        .block_on(tokio::net::TcpListener::bind("127.0.0.1:0"))
+        .expect("binding local NATS protocol stub");
+    let address = listener.local_addr().expect("stub address");
+    let server = runtime.spawn(async move {
+        let (stream, _) = listener.accept().await.expect("accepting NATS client");
+        let (reader, mut writer) = stream.into_split();
+        writer
+            .write_all(b"INFO {\"server_id\":\"test\",\"max_payload\":1048576}\r\n")
+            .await
+            .expect("sending server info");
+        let mut reader = tokio::io::BufReader::new(reader);
+        let mut line = String::new();
+        while reader.read_line(&mut line).await.expect("reading command") != 0 {
+            let response = if line.starts_with("PING") {
+                &b"PONG\r\n"[..]
+            } else if line.starts_with("SUB ") {
+                &b"-ERR 'Permissions Violation for Subscription to \"private.rejection.test\"'\r\n"
+                    [..]
+            } else if line.starts_with("PUB ") {
+                let size = line
+                    .split_ascii_whitespace()
+                    .next_back()
+                    .expect("publish size")
+                    .parse::<usize>()
+                    .expect("numeric publish size");
+                assert!(size <= 1024, "only small test payloads are expected");
+                let mut payload = vec![0; size + 2];
+                reader
+                    .read_exact(&mut payload)
+                    .await
+                    .expect("reading payload");
+                &b"-ERR 'Permissions Violation for Publish to \"private.rejection.test\"'\r\n"[..]
+            } else {
+                &b""[..]
+            };
+            writer.write_all(response).await.expect("sending response");
+            line.clear();
+        }
+    });
+    (format!("nats://{address}"), server)
+}
+
+#[test]
+fn permission_denials_post_sanitized_errors_and_reset_on_restart() {
+    let runtime = tokio::runtime::Runtime::new().expect("test server runtime");
+    for factory in ["natssrc", "natssink"] {
+        let element = element(factory);
+        element.set_property("subject", "private.rejection.test");
+        let bus = gst::Bus::new();
+        element.set_bus(Some(&bus));
+        for _run in 0..2 {
+            let (url, server) = permission_denying_server(&runtime);
+            element.set_property("servers", &url);
+            let mut harness = if factory == "natssink" {
+                let mut harness = gst_check::Harness::with_element(&element, Some("sink"), None);
+                harness.set_src_caps_str("application/octet-stream");
+                harness.play();
+                assert_eq!(
+                    harness.push(gst::Buffer::from_slice(b"test")),
+                    Ok(gst::FlowSuccess::Ok)
+                );
+                harness
+            } else {
+                let mut harness = gst_check::Harness::with_element(&element, None, Some("src"));
+                harness.play();
+                harness
+            };
+            let message = bus
+                .iter_timed_filtered(gst::ClockTime::from_seconds(2), &[gst::MessageType::Error])
+                .find(|message| {
+                    matches!(message.view(), gst::MessageView::Error(error)
+                        if error.error().matches(gst::ResourceError::NotAuthorized))
+                })
+                .expect("broker rejection must reach the bus");
+            let gst::MessageView::Error(error) = message.view() else {
+                panic!("expected an error message");
+            };
+            assert!(error.error().matches(gst::ResourceError::NotAuthorized));
+            let debug = error.debug().expect("sanitized error detail");
+            assert!(debug.ends_with("Core NATS server denied permission for an operation"));
+            assert!(!debug.contains("private.rejection.test"));
+            assert!(!error.error().message().contains("private.rejection.test"));
+            if factory == "natssink" {
+                assert_eq!(
+                    harness.push(gst::Buffer::from_slice(b"after rejection")),
+                    Err(gst::FlowError::Error)
+                );
+            } else {
+                assert_eq!(harness.buffers_in_queue(), 0);
+            }
+            drop(harness);
+            element
+                .set_state(gst::State::Null)
+                .expect("stopping rejected element");
+            runtime
+                .block_on(async { tokio::time::timeout(Duration::from_secs(2), server).await })
+                .expect("rejected connection must close")
+                .expect("protocol stub completed without panic");
+            while bus.pop().is_some() {}
+        }
+    }
 }
