@@ -411,6 +411,20 @@ impl BaseParseImpl for LineParse {
         &self,
         mut frame: gst_base::BaseParseFrame,
     ) -> Result<(gst::FlowSuccess, u32), gst::FlowError> {
+        // Pull-mode and untyped sources may never send a sink caps event.
+        if !self.obj().src_pad().has_current_caps() {
+            let upstream_caps = self.obj().sink_pad().peer_query_caps(None);
+            let caps = if upstream_caps.is_fixed() {
+                upstream_caps
+            } else {
+                gst::Caps::builder("application/octet-stream").build()
+            };
+            self.set_sink_caps(&caps).map_err(|error| {
+                gst::error!(CAT, imp = self, "Failed to set output caps: {error}");
+                gst::FlowError::NotNegotiated
+            })?;
+        }
+
         let settings = self.settings().clone();
         if settings.delimiter.is_empty() {
             return Err(self.format_error("delimiter must not be empty"));
