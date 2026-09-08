@@ -53,6 +53,22 @@ jobs:
       - name: Lint Metal provider
         run: cargo clippy -p gst-plugin-tract-inference --all-targets --features metal -- -D warnings
 
+      - name: Read minimum supported Rust version
+        run: |
+          sed -n 's/^rust-version = "\([^"]*\)"$/MSRV=\1/p' Cargo.toml >> "$GITHUB_ENV"
+
+      - name: Cache minimum supported Rust version toolchain
+        uses: actions/cache@v5
+        with:
+          path: ~/.rustup/toolchains/${{ env.MSRV }}-*
+          key: rust-msrv-${{ runner.os }}-${{ runner.arch }}-${{ env.MSRV }}
+
+      - name: Install minimum supported Rust version toolchain
+        run: mise install "rust@$MSRV"
+
+      - name: Test minimum supported Rust version
+        run: cargo +"$MSRV" test --locked -p gst-plugin-tract-inference --all-targets --features metal
+
   ort-coreml:
     if: >-
       ${{ github.event_name != 'pull_request' ||
@@ -91,6 +107,22 @@ jobs:
         env:
           GST_PLUGIN_PATH: ${{ github.workspace }}/target/debug
         run: gst-inspect-1.0 ortinference
+
+      - name: Read minimum supported Rust version
+        run: |
+          sed -n 's/^rust-version = "\([^"]*\)"$/MSRV=\1/p' Cargo.toml >> "$GITHUB_ENV"
+
+      - name: Cache minimum supported Rust version toolchain
+        uses: actions/cache@v5
+        with:
+          path: ~/.rustup/toolchains/${{ env.MSRV }}-*
+          key: rust-msrv-${{ runner.os }}-${{ runner.arch }}-${{ env.MSRV }}
+
+      - name: Install minimum supported Rust version toolchain
+        run: mise install "rust@$MSRV"
+
+      - name: Test minimum supported Rust version
+        run: cargo +"$MSRV" test --locked -p gst-plugin-ort-inference --all-targets --features coreml
 
   gstreamer-124:
     if: >-
@@ -298,3 +330,19 @@ jobs:
         run: |
           gst-inspect-1.0 nanodet
           gst-inspect-1.0 nanodettensordec
+
+      - name: Read minimum supported Rust version
+        run: |
+          sed -n 's/^rust-version = "\([^"]*\)"$/MSRV=\1/p' Cargo.toml >> "$GITHUB_ENV"
+
+      - name: Cache minimum supported Rust version toolchain
+        uses: actions/cache@v5
+        with:
+          path: ~/.rustup/toolchains/${{ env.MSRV }}-*
+          key: rust-msrv-${{ runner.os }}-${{ runner.arch }}-${{ env.MSRV }}
+
+      - name: Install minimum supported Rust version toolchain
+        run: mise install "rust@$MSRV"
+
+      - name: Test minimum supported Rust version
+        run: cargo +"$MSRV" test --workspace --all-targets --locked
