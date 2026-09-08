@@ -113,6 +113,77 @@ fn lineparse_and_lineenc_advertise_any_caps() {
 }
 
 #[test]
+fn lineparse_negotiates_file_input_in_pull_and_push_modes() {
+    init();
+    let path = std::env::temp_dir().join(format!("gstsmith-lines-{}.bin", std::process::id()));
+    std::fs::write(&path, b"one\n\n\xfftwo").expect("writing framed test input");
+
+    for (upstream, mode, expected_caps) in [
+        ("", gst::PadMode::Pull, "application/octet-stream"),
+        (
+            "application/x-lines-test, variant=fixed !",
+            gst::PadMode::Pull,
+            "application/x-lines-test, variant=fixed",
+        ),
+        ("queue !", gst::PadMode::Push, "application/octet-stream"),
+    ] {
+        let pipeline = gst::parse::launch(&format!(
+            "filesrc name=input ! {upstream} lineparse name=parser ! fakesink"
+        ))
+        .expect("constructing file parsing pipeline")
+        .downcast::<gst::Pipeline>()
+        .expect("pipeline is a bin");
+        pipeline
+            .by_name("input")
+            .expect("finding file source")
+            .set_property("location", path.to_str().expect("UTF-8 test path"));
+        let parser = pipeline.by_name("parser").expect("finding parser");
+        let src_pad = parser.static_pad("src").expect("finding parser source pad");
+        let records = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let captured = records.clone();
+        let _probe = src_pad.add_probe(gst::PadProbeType::BUFFER, move |_pad, info| {
+            if let Some(buffer) = info.buffer() {
+                captured
+                    .lock()
+                    .expect("locking captured records")
+                    .push(bytes(buffer));
+            }
+            gst::PadProbeReturn::Ok
+        });
+        pipeline
+            .set_state(gst::State::Playing)
+            .expect("starting file parsing");
+        let message = pipeline.bus().expect("pipeline bus").timed_pop_filtered(
+            gst::ClockTime::from_seconds(5),
+            &[gst::MessageType::Eos, gst::MessageType::Error],
+        );
+        let actual_caps = src_pad.current_caps();
+        let actual_mode = parser.static_pad("sink").expect("parser sink pad").mode();
+        pipeline
+            .set_state(gst::State::Null)
+            .expect("stopping file parsing");
+
+        assert_eq!(actual_mode, mode);
+        assert!(
+            message
+                .as_ref()
+                .is_some_and(|message| message.type_() == gst::MessageType::Eos),
+            "file parsing with {upstream:?} did not reach EOS: {message:?}"
+        );
+        assert_eq!(
+            actual_caps,
+            Some(expected_caps.parse().expect("valid expected caps"))
+        );
+        assert_eq!(
+            *records.lock().expect("locking captured records"),
+            [b"one".to_vec(), Vec::new(), b"\xfftwo".to_vec()]
+        );
+    }
+
+    std::fs::remove_file(path).expect("removing framed test input");
+}
+
+#[test]
 fn lineparse_properties_default_and_round_trip_in_ready() {
     let parser = element("lineparse");
     assert_eq!(parser.property::<String>("delimiter"), "\n");
