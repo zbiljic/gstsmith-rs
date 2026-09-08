@@ -67,6 +67,7 @@ struct QueueState {
     flushing: bool,
     failure: Option<String>,
     done: bool,
+    drain: Option<Arc<AtomicBool>>,
 }
 
 struct SharedQueue {
@@ -88,6 +89,7 @@ impl SharedQueue {
                 flushing: false,
                 failure: None,
                 done: false,
+                drain: None,
             }),
             capacity_available: Condvar::new(),
             done: Condvar::new(),
@@ -129,6 +131,13 @@ impl SharedQueue {
     fn finish(&self) {
         self.state().done = true;
         self.capacity_available.notify_all();
+        self.done.notify_all();
+    }
+
+    fn complete_drain(&self, drained: &AtomicBool) {
+        // Serialize completion with the condvar wait to avoid a lost wakeup.
+        let _state = self.state();
+        drained.store(true, Ordering::Relaxed);
         self.done.notify_all();
     }
 }
@@ -246,12 +255,21 @@ impl S2Sink {
         wait_hook: impl FnOnce(),
     ) -> DrainOutcome {
         let mut wait_hook = Some(wait_hook);
-        shared.close();
         let Some(deadline) = Instant::now().checked_add(timeout) else {
             return DrainOutcome::Timeout("shutdown timeout cannot be represented".to_owned());
         };
         let mut state = shared.state();
-        while !state.done && !state.flushing && state.failure.is_none() {
+        let drained = Arc::clone(
+            state
+                .drain
+                .get_or_insert_with(|| Arc::new(AtomicBool::new(false))),
+        );
+        shared.worker_wakeup.notify_one();
+        while !state.done
+            && !drained.load(Ordering::Relaxed)
+            && !state.flushing
+            && state.failure.is_none()
+        {
             let now = Instant::now();
             if now >= deadline {
                 drop(state);
@@ -273,7 +291,7 @@ impl S2Sink {
         }
         if let Some(detail) = state.failure.as_ref() {
             DrainOutcome::WorkerFailure(detail.clone())
-        } else if state.done {
+        } else if state.done || drained.load(Ordering::Relaxed) {
             DrainOutcome::Complete
         } else if state.flushing {
             DrainOutcome::Flushing
@@ -523,6 +541,7 @@ impl BaseSinkImpl for S2Sink {
             shutdown_timeout,
         } = old_state
         {
+            shared.close();
             let drain_result = Self::drain(&shared, shutdown_timeout);
             let runtime = runtime::runtime().map_err(Self::settings_error)?;
             if runtime
@@ -637,14 +656,19 @@ async fn append_worker(config: WorkerConfig, shared: Arc<SharedQueue>) -> Result
     let mut tickets = FuturesUnordered::<RecordSubmitTicket>::new();
 
     loop {
-        let (record, accepting) = {
+        let (record, accepting, drain) = {
             let mut state = shared.state();
             let record = state.records.pop_front();
             let accepting = state.accepting;
             if record.is_some() {
                 shared.capacity_available.notify_one();
             }
-            (record, accepting)
+            let drain = if record.is_none() {
+                state.drain.take()
+            } else {
+                None
+            };
+            (record, accepting, drain)
         };
         if let Some(record) = record {
             let submission = async {
@@ -663,6 +687,20 @@ async fn append_worker(config: WorkerConfig, shared: Arc<SharedQueue>) -> Result
         }
         if !accepting {
             break;
+        }
+        if let Some(drained) = drain {
+            let flush = async {
+                producer
+                    .flush()
+                    .await
+                    .map_err(|error| sanitized_error(&error))
+            };
+            submit_while_observing(flush, &mut tickets, &shared.cancel, |error| {
+                sanitized_error(&error)
+            })
+            .await?;
+            shared.complete_drain(&drained);
+            continue;
         }
         if tickets.is_empty() {
             tokio::select! {
@@ -871,6 +909,36 @@ mod tests {
         assert!(shared.state().failure.is_none());
         assert!(!shared.cancel.is_cancelled());
         assert!(!shared.error_posted.load(Ordering::Relaxed));
+        shared.state().flushing = false;
+        assert_eq!(enqueue_record(&shared, record(1)), Ok(()));
+    }
+
+    #[test]
+    fn successive_drains_wait_for_their_own_completion_and_keep_accepting() {
+        let shared = SharedQueue::new(1);
+        for value in 0..2 {
+            std::thread::scope(|scope| {
+                let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+                let shared = &shared;
+                let worker = scope.spawn(move || {
+                    ready_rx
+                        .recv_timeout(Duration::from_secs(1))
+                        .expect("drain starts waiting");
+                    let drained = shared.state().drain.take().expect("new drain request");
+                    shared.complete_drain(&drained);
+                });
+                assert_eq!(
+                    S2Sink::drain_with_wait_hook(shared, Duration::from_secs(2), || {
+                        ready_tx.send(()).expect("notifying test worker");
+                    }),
+                    DrainOutcome::Complete
+                );
+                worker.join().expect("test worker joins");
+            });
+            assert!(!shared.state().done, "EOS does not terminate the worker");
+            assert_eq!(enqueue_record(&shared, record(value)), Ok(()));
+            let _record = shared.state().records.pop_front();
+        }
     }
 
     #[test]
