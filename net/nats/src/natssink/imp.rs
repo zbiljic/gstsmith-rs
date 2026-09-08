@@ -6,6 +6,7 @@ use gst::prelude::*;
 use gst::subclass::prelude::*;
 use gst_base::prelude::*;
 use gst_base::subclass::prelude::*;
+use tokio_util::sync::CancellationToken;
 
 use crate::connection::ConnectionSettings;
 use crate::{message_meta, runtime};
@@ -52,6 +53,7 @@ enum State {
         worker: tokio::task::JoinHandle<()>,
         failure: Arc<Mutex<Option<String>>>,
         error_posted: Arc<AtomicBool>,
+        rejected: Arc<CancellationToken>,
         flushing: bool,
         fixed_headers: Option<async_nats::HeaderMap>,
         drain_timeout: std::time::Duration,
@@ -278,7 +280,8 @@ impl BaseSinkImpl for NatsSink {
                 DEFAULT_QUEUE_CAPACITY as usize,
             )
             .map_err(Self::settings_error)?;
-        let options = crate::connection::observe_events(options, self.obj().downgrade());
+        let rejected = Arc::new(CancellationToken::new());
+        let options = crate::connection::observe_events(options, self.obj().downgrade(), &rejected);
         let runtime = runtime::runtime().map_err(Self::settings_error)?;
         let servers = validated.servers;
         let client = runtime
@@ -292,19 +295,25 @@ impl BaseSinkImpl for NatsSink {
         let weak = self.obj().downgrade();
         let worker_failure = Arc::clone(&failure);
         let worker_error_posted = Arc::clone(&error_posted);
-        let worker = runtime.spawn(publish_worker(
-            client,
-            receiver,
-            worker_failure,
-            worker_error_posted,
-            weak,
-        ));
+        let worker_rejected = Arc::clone(&rejected);
+        let worker = runtime.spawn(async move {
+            let _completed = worker_rejected
+                .run_until_cancelled(publish_worker(
+                    client,
+                    receiver,
+                    worker_failure,
+                    worker_error_posted,
+                    weak,
+                ))
+                .await;
+        });
         self.dropped_messages.store(0, Ordering::Relaxed);
         *self.state() = State::Started {
             sender: Some(sender),
             worker,
             failure,
             error_posted,
+            rejected,
             flushing: false,
             fixed_headers,
             drain_timeout: std::time::Duration::from_nanos(settings.drain_timeout),
@@ -387,6 +396,7 @@ impl BaseSinkImpl for NatsSink {
             sender,
             failure,
             error_posted,
+            rejected,
             flushing,
             fixed_headers,
             ..
@@ -396,6 +406,9 @@ impl BaseSinkImpl for NatsSink {
         };
         if *flushing {
             return Err(gst::FlowError::Flushing);
+        }
+        if rejected.is_cancelled() {
+            return Err(gst::FlowError::Error);
         }
         if let Some(error) = failure
             .lock()
@@ -555,6 +568,7 @@ mod tests {
             worker,
             failure: Arc::new(Mutex::new(None)),
             error_posted: Arc::new(AtomicBool::new(false)),
+            rejected: Arc::new(CancellationToken::new()),
             flushing: false,
             fixed_headers: None,
             drain_timeout: std::time::Duration::ZERO,
@@ -604,6 +618,7 @@ mod tests {
             worker,
             failure: Arc::new(Mutex::new(None)),
             error_posted: Arc::new(AtomicBool::new(false)),
+            rejected: Arc::new(CancellationToken::new()),
             flushing: false,
             fixed_headers: None,
             drain_timeout: std::time::Duration::from_secs(1),
