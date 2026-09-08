@@ -14,6 +14,8 @@ pub(super) struct Contract {
     pub(super) input_size: usize,
     pub(super) points: usize,
     pub(super) strides: &'static [usize],
+    // NanoDet-m's GFLHead uses cell centers; NanoDet-Plus uses grid origins.
+    half_stride_offset: bool,
 }
 
 impl Contract {
@@ -26,6 +28,15 @@ impl Contract {
     pub(super) const fn elements(self) -> usize {
         self.points * CHANNELS
     }
+
+    #[expect(
+        clippy::cast_precision_loss,
+        reason = "supported grid coordinates are exactly representable"
+    )]
+    fn center(self, grid: usize, stride: f32) -> f32 {
+        let offset = if self.half_stride_offset { 0.5 } else { 0.0 };
+        (grid as f32 + offset) * stride
+    }
 }
 
 pub(super) const CONTRACTS: [Contract; 4] = [
@@ -34,24 +45,28 @@ pub(super) const CONTRACTS: [Contract; 4] = [
         input_size: 320,
         points: 2_100,
         strides: NANODET_STRIDES,
+        half_stride_offset: true,
     },
     Contract {
         name: "nanodet-plus-320",
         input_size: 320,
         points: 2_125,
         strides: NANODET_PLUS_STRIDES,
+        half_stride_offset: false,
     },
     Contract {
         name: "nanodet-m-416",
         input_size: 416,
         points: 3_549,
         strides: NANODET_STRIDES,
+        half_stride_offset: true,
     },
     Contract {
         name: "nanodet-plus-416",
         input_size: 416,
         points: 3_598,
         strides: NANODET_PLUS_STRIDES,
+        half_stride_offset: false,
     },
 ];
 
@@ -228,11 +243,10 @@ fn decode_values<T: Copy>(
                     continue;
                 }
 
-                #[expect(
-                    clippy::cast_precision_loss,
-                    reason = "supported grid coordinates and input sizes are exactly representable"
-                )]
-                let (center_x, center_y) = (grid_x as f32 * stride_f32, grid_y as f32 * stride_f32);
+                let (center_x, center_y) = (
+                    contract.center(grid_x, stride_f32),
+                    contract.center(grid_y, stride_f32),
+                );
                 let (x1, y1, x2, y2) = (
                     (center_x - distances[0]).clamp(0.0, input_size),
                     (center_y - distances[1]).clamp(0.0, input_size),
@@ -447,28 +461,42 @@ mod tests {
     }
 
     #[test]
-    fn decodes_a_known_point_and_clamps_boundaries_for_each_contract() {
-        for contract in CONTRACTS {
-            let mut values = output(contract);
-            let first_grid = contract.input_size.div_ceil(contract.strides[0]);
-            set_candidate(&mut values, first_grid + 1, 7, 0.9, 1);
-            let detections = decoded(&values, contract, 0.3, 0.6, 100);
-            assert_eq!(detections.len(), 1, "{}", contract.name);
-            let detection = detections.first().expect("one detection");
-            assert_eq!(detection.class, 7);
-            assert!((detection.score - 0.9).abs() < 1e-6);
-            assert!(detection.x1 >= 0.0 && detection.y1 >= 0.0);
-            #[expect(
-                clippy::cast_precision_loss,
-                reason = "supported input sizes are exactly representable"
-            )]
-            let input_size = contract.input_size as f32;
-            assert!(detection.x2 <= input_size);
-            assert!(detection.y2 <= input_size);
-            assert!((detection.x1 - 0.0).abs() < 0.01);
-            assert!((detection.y1 - 0.0).abs() < 0.01);
-            assert!((detection.x2 - 16.0).abs() < 0.01);
-            assert!((detection.y2 - 16.0).abs() < 0.01);
+    fn decodes_known_points_for_every_model_and_stride() {
+        for (contract, expected_offsets) in [
+            (CONTRACTS[0], [4.0, 8.0, 16.0, 0.0]),
+            (CONTRACTS[1], [0.0; 4]),
+            (CONTRACTS[2], [4.0, 8.0, 16.0, 0.0]),
+            (CONTRACTS[3], [0.0; 4]),
+        ] {
+            let mut level_start = 0;
+            for (&stride, offset) in contract.strides.iter().zip(expected_offsets) {
+                let mut values = output(contract);
+                let grid = contract.input_size.div_ceil(stride);
+                set_candidate(&mut values, level_start + grid + 1, 7, 0.9, 1);
+                level_start += grid * grid;
+                let detections = decoded(&values, contract, 0.3, 0.6, 100);
+                assert_eq!(detections.len(), 1, "{} stride {stride}", contract.name);
+                let detection = detections.first().expect("one detection");
+                assert_eq!(detection.class, 7);
+                assert!((detection.score - 0.9).abs() < 1e-6);
+                #[expect(
+                    clippy::cast_precision_loss,
+                    reason = "supported strides are exactly representable"
+                )]
+                let far_edge = 2.0 * stride as f32 + offset;
+                for (actual, expected) in [
+                    (detection.x1, offset),
+                    (detection.y1, offset),
+                    (detection.x2, far_edge),
+                    (detection.y2, far_edge),
+                ] {
+                    assert!(
+                        (actual - expected).abs() < 0.01,
+                        "{} stride {stride}: expected {expected}, got {actual}",
+                        contract.name
+                    );
+                }
+            }
         }
     }
 

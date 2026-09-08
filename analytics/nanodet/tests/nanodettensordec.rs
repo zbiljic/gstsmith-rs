@@ -227,7 +227,7 @@ fn missing_metadata_and_a_different_tensor_id_pass_through() {
 #[test]
 fn decodes_every_model_contract_and_float_type() {
     init();
-    for contract in CONTRACTS {
+    for (contract, expected_size) in CONTRACTS.into_iter().zip([12, 8, 12, 8]) {
         for kind in [TensorKind::Float32, TensorKind::Float16] {
             let element = gst::ElementFactory::make("nanodettensordec")
                 .build()
@@ -256,7 +256,12 @@ fn decodes_every_model_contract_and_float_type() {
                 .next()
                 .expect("one object detection");
             assert_eq!(object.obj_type().expect("object type").as_str(), "class-7");
-            assert!(object.location().expect("object location").loc_conf_lvl > 0.89);
+            let location = object.location().expect("object location");
+            assert!(location.loc_conf_lvl > 0.89);
+            assert_eq!(
+                (location.x, location.y, location.w, location.h),
+                (0, 0, expected_size, expected_size)
+            );
             assert_eq!(
                 relation
                     .iter_direct_related::<gst_analytics::AnalyticsClassificationMtd>(
