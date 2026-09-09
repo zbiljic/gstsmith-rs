@@ -1,6 +1,8 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt::Write;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock};
+use std::time::Instant;
 
 use gst::glib;
 use gst::prelude::*;
@@ -78,6 +80,122 @@ enum IgnoreReason {
     SeriesLimit,
 }
 
+#[derive(Clone, Copy)]
+struct QueueLimits {
+    buffers: u32,
+    bytes: u32,
+    time: u64,
+}
+
+struct QueueEntry {
+    element: glib::WeakRef<gst::Element>,
+    limits: Arc<Mutex<Option<QueueLimits>>>,
+    handlers: Vec<glib::SignalHandlerId>,
+}
+
+impl QueueEntry {
+    fn new(element: &gst::Element) -> Self {
+        let limits = Arc::new(Mutex::new(None));
+        let handlers = ["max-size-buffers", "max-size-bytes", "max-size-time"]
+            .into_iter()
+            .map(|name| {
+                let limits = Arc::clone(&limits);
+                element.connect_notify(Some(name), move |_, _| *limits.lock() = None)
+            })
+            .collect();
+        Self {
+            element: element.downgrade(),
+            limits,
+            handlers,
+        }
+    }
+}
+
+impl Drop for QueueEntry {
+    fn drop(&mut self) {
+        if let Some(element) = self.element.upgrade() {
+            for handler in self.handlers.drain(..) {
+                element.disconnect(handler);
+            }
+        }
+    }
+}
+
+struct NameWatch {
+    object: glib::WeakRef<gst::Object>,
+    parent: Option<usize>,
+    handler: Option<glib::SignalHandlerId>,
+}
+
+impl NameWatch {
+    fn new(object: &gst::Object, dirty: &Arc<AtomicBool>) -> Self {
+        let dirty = Arc::clone(dirty);
+        let handler = object.connect_notify(Some("name"), move |_, _| {
+            dirty.store(true, Ordering::Release);
+        });
+        Self {
+            object: object.downgrade(),
+            parent: None,
+            handler: Some(handler),
+        }
+    }
+}
+
+impl Drop for NameWatch {
+    fn drop(&mut self) {
+        if let Some(object) = self.object.upgrade()
+            && let Some(handler) = self.handler.take()
+        {
+            object.disconnect(handler);
+        }
+    }
+}
+
+struct CachedQueue {
+    key: usize,
+    entry: std::sync::Weak<QueueEntry>,
+    labels: ElementLabels,
+}
+
+// ponytail: one dirty flag rebuilds all queue identities after any graph edit.
+// Use per-pipeline invalidation only if rebuilds across independent pipelines matter.
+#[derive(Default)]
+struct QueueCache {
+    checked_at: Option<Instant>,
+    watches: HashMap<usize, NameWatch>,
+    queues: Vec<CachedQueue>,
+}
+
+impl QueueCache {
+    fn watch_ancestors(
+        &mut self,
+        element: &gst::Element,
+        dirty: &Arc<AtomicBool>,
+        seen: &mut HashSet<gst::Object>,
+    ) {
+        let mut current = Some(element.clone().upcast::<gst::Object>());
+        while let Some(object) = current {
+            if !seen.insert(object.clone()) {
+                break;
+            }
+            let key = object.as_ptr() as usize;
+            if self
+                .watches
+                .get(&key)
+                .is_some_and(|watch| watch.object.upgrade().is_none())
+            {
+                self.watches.remove(&key);
+            }
+            current = object.parent();
+            let watch = self
+                .watches
+                .entry(key)
+                .or_insert_with(|| NameWatch::new(&object, dirty));
+            watch.parent = current.as_ref().map(|parent| parent.as_ptr() as usize);
+        }
+    }
+}
+
 struct PipelineEntry {
     pipeline: glib::WeakRef<gst::Pipeline>,
     labels: Vec<PipelineLabels>,
@@ -103,7 +221,10 @@ pub(crate) struct Metrics {
     pads: papaya::HashMap<usize, PadEntry>,
     tracked_pad_count: Mutex<usize>,
     pipelines: RwLock<HashMap<usize, PipelineEntry>>,
-    queues: RwLock<HashMap<usize, glib::WeakRef<gst::Element>>>,
+    queues: RwLock<HashMap<usize, Arc<QueueEntry>>>,
+    queue_cache: Mutex<QueueCache>,
+    queue_identities_dirty: Arc<AtomicBool>,
+    queue_labels: Mutex<HashSet<ElementLabels>>,
     include_filter: Option<Regex>,
     exclude_filter: Option<Regex>,
     max_pad_series: usize,
@@ -227,6 +348,9 @@ impl Metrics {
             tracked_pad_count: Mutex::new(0),
             pipelines: RwLock::default(),
             queues: RwLock::default(),
+            queue_cache: Mutex::default(),
+            queue_identities_dirty: Arc::default(),
+            queue_labels: Mutex::default(),
             include_filter,
             exclude_filter,
             max_pad_series,
@@ -315,6 +439,7 @@ impl Metrics {
     }
 
     pub(crate) fn remove_object_key(&self, key: usize) {
+        self.invalidate_queue_identities();
         self.remove_pad_key(key);
         self.remove_pipeline_key(key);
         self.remove_queue_key(key);
@@ -422,70 +547,150 @@ impl Metrics {
         self.queues
             .write()
             .entry(element.as_ptr() as usize)
-            .or_insert_with(|| element.downgrade());
+            .or_insert_with(|| Arc::new(QueueEntry::new(element)));
+        self.invalidate_queue_identities();
     }
 
-    fn refresh_queues(&self) {
-        // Rebuild queue series from current paths; ancestor bins may have moved.
-        self.queue_level_buffers.clear();
-        self.queue_level_bytes.clear();
-        self.queue_level_seconds.clear();
-        self.queue_capacity_buffers.clear();
-        self.queue_capacity_bytes.clear();
-        self.queue_capacity_seconds.clear();
+    pub(crate) fn invalidate_queue_identities(&self) {
+        self.queue_identities_dirty.store(true, Ordering::Release);
+    }
+
+    fn refresh_queue_cache(&self, cache: &mut QueueCache) {
+        // Clear before rebuilding so notifications during the rebuild remain pending.
+        // Direct GstObject parenting has no notification on GStreamer 1.24. Recheck
+        // at the first sample at least 30 seconds after the previous check.
+        let dirty = self.queue_identities_dirty.swap(false, Ordering::AcqRel);
+        if !dirty
+            && cache
+                .checked_at
+                .is_some_and(|at| at.elapsed() < std::time::Duration::from_secs(30))
+        {
+            return;
+        }
+        cache.checked_at = Some(Instant::now());
+        if !dirty
+            && cache.watches.values().all(|watch| {
+                watch.object.upgrade().is_some_and(|object| {
+                    object.parent().map(|parent| parent.as_ptr() as usize) == watch.parent
+                })
+            })
+        {
+            return;
+        }
         let snapshot = self
             .queues
             .read()
             .iter()
-            .map(|(key, weak)| (*key, weak.clone()))
+            .map(|(key, entry)| (*key, Arc::clone(entry)))
             .collect::<Vec<_>>();
-        let mut stale = Vec::new();
-        for (key, weak) in snapshot {
-            let Some(element) = weak.upgrade() else {
-                stale.push(key);
+        cache.queues.clear();
+        let mut seen = HashSet::new();
+        let mut parent_paths = HashMap::new();
+        for (key, entry) in snapshot {
+            let Some(element) = entry.element.upgrade() else {
+                self.remove_queue_key(key);
                 continue;
             };
-            let identity = element.path_string().to_string();
-            if !self.included(&identity) {
-                continue;
+            // Watch excluded queues too: a rename or ancestor move can include them.
+            cache.watch_ancestors(&element, &self.queue_identities_dirty, &mut seen);
+            let identity = if let Some(parent) = element.parent() {
+                let prefix = parent_paths
+                    .entry(parent.clone())
+                    .or_insert_with(|| parent.path_string());
+                // The tracked core queue/queue2 types both use "/" path separators.
+                format!("{prefix}/{}:{}", element.type_().name(), element.name())
+            } else {
+                element.path_string().to_string()
+            };
+            if self.included(&identity) {
+                cache.queues.push(CachedQueue {
+                    key,
+                    entry: Arc::downgrade(&entry),
+                    labels: ElementLabels {
+                        element: identity.into(),
+                    },
+                });
             }
-            let labels = ElementLabels {
-                element: identity.into(),
+        }
+        cache.watches.retain(|_, watch| {
+            watch
+                .object
+                .upgrade()
+                .is_some_and(|object| seen.contains(&object))
+        });
+    }
+
+    fn refresh_queues(&self) {
+        // Reuse live series and remove obsolete labels after sampling current paths.
+        let mut previous_labels = self.queue_labels.lock();
+        let mut cache = self.queue_cache.lock();
+        self.refresh_queue_cache(&mut cache);
+        let mut current_labels = HashSet::with_capacity(cache.queues.len());
+        let mut stale = Vec::new();
+        for cached in &cache.queues {
+            let Some(entry) = cached.entry.upgrade() else {
+                continue;
             };
+            let Some(element) = entry.element.upgrade() else {
+                stale.push(cached.key);
+                continue;
+            };
+            // Serialize refresh with notifications so a concurrent setter cannot lose invalidation.
+            let limits = *entry.limits.lock().get_or_insert_with(|| QueueLimits {
+                buffers: element.property("max-size-buffers"),
+                bytes: element.property("max-size-bytes"),
+                time: element.property("max-size-time"),
+            });
+            let labels = &cached.labels;
             let values = (
                 element.property::<u32>("current-level-buffers"),
                 element.property::<u32>("current-level-bytes"),
                 element.property::<u64>("current-level-time"),
-                element.property::<u32>("max-size-buffers"),
-                element.property::<u32>("max-size-bytes"),
-                element.property::<u64>("max-size-time"),
+                limits.buffers,
+                limits.bytes,
+                limits.time,
             );
             self.queue_level_buffers
-                .get_or_create(&labels)
+                .get_or_create(labels)
                 .set(i64::from(values.0));
             self.queue_level_bytes
-                .get_or_create(&labels)
+                .get_or_create(labels)
                 .set(i64::from(values.1));
             self.queue_level_seconds
-                .get_or_create(&labels)
+                .get_or_create(labels)
                 .set(std::time::Duration::from_nanos(values.2).as_secs_f64());
             self.queue_capacity_buffers
-                .get_or_create(&labels)
+                .get_or_create(labels)
                 .set(i64::from(values.3));
             self.queue_capacity_bytes
-                .get_or_create(&labels)
+                .get_or_create(labels)
                 .set(i64::from(values.4));
             self.queue_capacity_seconds
-                .get_or_create(&labels)
+                .get_or_create(labels)
                 .set(std::time::Duration::from_nanos(values.5).as_secs_f64());
+            current_labels.insert(labels.clone());
         }
+        for labels in previous_labels.difference(&current_labels) {
+            self.queue_level_buffers.remove(labels);
+            self.queue_level_bytes.remove(labels);
+            self.queue_level_seconds.remove(labels);
+            self.queue_capacity_buffers.remove(labels);
+            self.queue_capacity_bytes.remove(labels);
+            self.queue_capacity_seconds.remove(labels);
+        }
+        *previous_labels = current_labels;
         for key in stale {
             self.remove_queue_key(key);
         }
     }
 
     fn remove_queue_key(&self, key: usize) {
-        self.queues.write().remove(&key);
+        // Disconnect handlers and release GStreamer references after unlocking the map.
+        let entry = self.queues.write().remove(&key);
+        if entry.is_some() {
+            self.invalidate_queue_identities();
+        }
+        drop(entry);
     }
 
     pub(crate) fn encode(&self) -> Result<String, std::fmt::Error> {
@@ -791,6 +996,7 @@ mod tests {
                     .add(&second_bin)
                     .expect("parenting second bin");
 
+                metrics.invalidate_queue_identities();
                 let output = metrics.encode().expect("sampling parented bins");
                 assert!(output.contains(&sample(&first, 11)), "{output}");
                 assert!(output.contains(&sample(&second, 22)), "{output}");
@@ -803,6 +1009,7 @@ mod tests {
                 excluded
                     .add(&first_bin)
                     .expect("moving bin into excluded pipeline");
+                metrics.invalidate_queue_identities();
                 let output = metrics.encode().expect("sampling reparented bin");
                 assert!(!output.contains(&old_sample), "{output}");
                 assert_eq!(output.contains(&sample(&first, 11)), !filtered, "{output}");
@@ -820,6 +1027,219 @@ mod tests {
                 let output = metrics.encode().expect("sampling after queue removal");
                 assert!(output.contains(&sample(&first, 11)), "{output}");
                 assert!(!output.contains(&second_sample), "{output}");
+            }
+        }
+    }
+
+    #[test]
+    fn queue_cache_handles_notifications_verification_and_cleanup() {
+        gst::init().expect("initializing GStreamer");
+        let metrics = Metrics::new(None, None, 1);
+        let root = gst::Pipeline::builder().name("root").build();
+        let outer = gst::Bin::builder().name("outer").build();
+        let queue = gst::ElementFactory::make("queue")
+            .name("observed")
+            .property("max-size-buffers", 11_u32)
+            .build()
+            .expect("constructing queue");
+        root.add(&outer).expect("parenting outer bin");
+        outer.add(&queue).expect("parenting queue");
+        metrics.track_queue(&queue);
+        let sample = || {
+            let output = metrics.encode().expect("sampling queue");
+            assert!(
+                output.contains(&format!(
+                    "gstsmith_gstreamer_queue_capacity_buffers{{element=\"{}\"}} 11",
+                    queue.path_string()
+                )),
+                "{output}"
+            );
+        };
+        sample();
+        let checked_at = metrics.queue_cache.lock().checked_at;
+        sample();
+        assert_eq!(
+            metrics.queue_cache.lock().checked_at,
+            checked_at,
+            "stable samples reuse identities"
+        );
+
+        // Parent links return to the same values, but the name watch must invalidate.
+        root.remove(&outer).expect("detaching ancestor");
+        outer.set_property("name", "renamed:outer/branch");
+        root.add(&outer).expect("restoring ancestor");
+        assert!(metrics.queue_identities_dirty.load(Ordering::Acquire));
+        sample();
+
+        // No native bin hook is emitted here. Verify the documented fallback delay
+        // without sleeping: advancing the deadline must discover the missed change.
+        let before = metrics.encode().expect("sampling queue");
+        let owner = gst::Bin::builder().name("owner").build();
+        root.set_property("parent", &owner);
+        assert_eq!(metrics.encode().expect("sampling queue"), before);
+        metrics.queue_cache.lock().checked_at = None;
+        sample();
+        root.unparent();
+        metrics.queue_cache.lock().checked_at = None;
+        sample();
+
+        std::thread::scope(|scope| {
+            scope.spawn(|| {
+                for index in 0..32 {
+                    root.set_property("name", format!("root_{index}"));
+                }
+            });
+            for _sample in 0..32 {
+                let _output = metrics.encode().expect("sampling queue");
+            }
+        });
+        sample();
+        let weak_root = root.downgrade();
+        drop(root);
+        assert!(
+            weak_root.upgrade().is_none(),
+            "cache must not own ancestors"
+        );
+        metrics.invalidate_queue_identities(); // ObjectDestroyed hook in a live tracer.
+        sample();
+
+        metrics.remove_object_key(queue.as_ptr() as usize);
+        let _output = metrics.encode().expect("sampling queue");
+        assert!(metrics.queue_cache.lock().watches.is_empty());
+        assert_eq!(
+            Arc::strong_count(&metrics.queue_identities_dirty),
+            1,
+            "pruning must disconnect name handlers on still-live objects"
+        );
+        metrics.track_queue(&queue);
+        sample();
+        let dirty = Arc::downgrade(&metrics.queue_identities_dirty);
+        drop(metrics);
+        assert!(
+            dirty.upgrade().is_none(),
+            "collector destruction must disconnect name handlers"
+        );
+    }
+
+    #[test]
+    fn queue_limits_cache_handles_updates_and_tracking_lifecycle() {
+        gst::init().expect("initializing GStreamer");
+        for factory in ["queue", "queue2"] {
+            let metrics = Metrics::new(None, None, 1);
+            let queue = gst::ElementFactory::make(factory)
+                .build()
+                .expect("constructing queue");
+            let key = queue.as_ptr() as usize;
+            metrics.track_queue(&queue);
+            let cache = Arc::downgrade(
+                &metrics
+                    .queues
+                    .read()
+                    .get(&key)
+                    .expect("tracked queue")
+                    .limits,
+            );
+            let set_limits = |value: u32| {
+                queue.set_property("max-size-buffers", value);
+                queue.set_property("max-size-bytes", value * 1024);
+                queue.set_property("max-size-time", u64::from(value) * 1_000_000_000);
+            };
+            let assert_limits = |value: u32| {
+                let output = metrics.encode().expect("sampling changed limits");
+                for (suffix, expected) in [
+                    ("buffers", u64::from(value)),
+                    ("bytes", u64::from(value) * 1024),
+                    ("seconds", u64::from(value)),
+                ] {
+                    assert!(output.contains(&format!(
+                            "gstsmith_gstreamer_queue_capacity_{suffix}{{element=\"{}\"}} {expected}",
+                            queue.path_string()
+                        )), "{output}");
+                }
+            };
+            for value in [0, 1] {
+                set_limits(value);
+                assert_limits(value);
+            }
+            std::thread::scope(|scope| {
+                scope.spawn(|| {
+                    for value in 2..=32 {
+                        set_limits(value);
+                    }
+                });
+                for _sample in 0..32 {
+                    let _snapshot = metrics.encode().expect("sampling queue");
+                }
+            });
+            assert_limits(32);
+
+            metrics.remove_object_key(key);
+            assert!(
+                cache.upgrade().is_none(),
+                "removal must disconnect notification handlers"
+            );
+            set_limits(33);
+            metrics.track_queue(&queue);
+            assert_limits(33);
+            let cache = Arc::downgrade(
+                &metrics
+                    .queues
+                    .read()
+                    .get(&key)
+                    .expect("retracked queue")
+                    .limits,
+            );
+            drop(metrics);
+            assert!(
+                cache.upgrade().is_none(),
+                "collector destruction must disconnect handlers"
+            );
+        }
+    }
+
+    #[test]
+    fn queue_sampling_refreshes_sibling_paths_and_values() {
+        gst::init().expect("initializing GStreamer");
+        for factory in ["queue", "queue2"] {
+            let metrics = Metrics::new(None, None, 1);
+            let pipeline = gst::Pipeline::new();
+            let bin = gst::Bin::builder().name("nested:bin/branch").build();
+            pipeline.add(&bin).expect("parenting bin");
+            let queues =
+                [("first:queue/name", 11_u32), ("second\"queue", 22)].map(|(name, capacity)| {
+                    let queue = gst::ElementFactory::make(factory)
+                        .name(name)
+                        .build()
+                        .expect("constructing queue");
+                    bin.add(&queue).expect("parenting queue");
+                    metrics.track_queue(&queue);
+                    (queue, capacity)
+                });
+            for (name, offset) in [("original", 0), ("renamed\"/pipeline", 1)] {
+                pipeline.set_property("name", name);
+                for (queue, capacity) in &queues {
+                    queue.set_property("max-size-buffers", capacity + offset);
+                }
+                let output = metrics.encode().expect("sampling sibling queues");
+                assert_eq!(
+                    output
+                        .lines()
+                        .filter(
+                            |line| line.starts_with("gstsmith_gstreamer_queue_capacity_buffers{")
+                        )
+                        .count(),
+                    queues.len()
+                );
+                for (queue, capacity) in &queues {
+                    let labels = ElementLabels {
+                        element: queue.path_string().to_string().into(),
+                    };
+                    let gauge = metrics
+                        .queue_capacity_buffers
+                        .get(&labels)
+                        .expect("labels match the native GStreamer path");
+                    assert_eq!(gauge.get(), i64::from(capacity + offset));
+                }
             }
         }
     }

@@ -74,6 +74,11 @@ and DogStatsD delimiters become `_`. Filters always see the original identity
 before sanitization. Dynamic object identities are never placed in metric
 names.
 
+Queue identities and filters refresh after bin additions/removals and renames.
+Direct `GstObject` parenting outside bin APIs is detected by a fallback check at
+the first export at least 30 seconds after the previous check. Queue levels
+and configured limits remain current at each export.
+
 ## Runtime and scope
 
 Streaming callbacks only use a cached Papaya lookup and relaxed atomics. The

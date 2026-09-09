@@ -270,6 +270,7 @@ impl ObjectImpl for PrometheusTracer {
         self.register_hook(TracerHook::ElementRemovePad);
         self.register_hook(TracerHook::BinAddPost);
         self.register_hook(TracerHook::BinRemovePre);
+        self.register_hook(TracerHook::BinRemovePost);
         self.register_hook(TracerHook::ObjectDestroyed);
         self.register_hook(TracerHook::ElementChangeStatePost);
         self.register_hook(TracerHook::PadPushPre);
@@ -315,12 +316,22 @@ impl TracerImpl for PrometheusTracer {
     fn bin_add_post(&self, _ts: u64, _bin: &gst::Bin, element: &gst::Element, success: bool) {
         if success {
             self.track_element(element);
+            if let Some(metrics) = self.metrics.get() {
+                metrics.invalidate_queue_identities();
+            }
         }
     }
 
     fn bin_remove_pre(&self, _ts: u64, _bin: &gst::Bin, element: &gst::Element) {
         if let Some(metrics) = self.metrics.get() {
             metrics.remove_object_key(element.as_ptr() as usize);
+        }
+    }
+
+    fn bin_remove_post(&self, _ts: u64, _bin: &gst::Bin, success: bool) {
+        // A sample can run between remove-pre and the actual unparenting.
+        if success && let Some(metrics) = self.metrics.get() {
+            metrics.invalidate_queue_identities();
         }
     }
 
@@ -534,6 +545,65 @@ mod tests {
             .set_state(gst::State::Playing)
             .expect("starting queue pipeline");
         (pipeline, source, queue, sink, release, entered_rx)
+    }
+
+    #[test]
+    fn tracer_queue_cache_follows_bin_hooks_and_renames() {
+        let _guard = TRACER_TEST_LOCK.lock();
+        gst::init().expect("initializing GStreamer");
+        let tracer = glib::Object::builder::<super::super::PrometheusTracer>()
+            .property("listen", "127.0.0.1:0")
+            .property("include-filter", "GstPipeline:event_cache_")
+            .property("exclude-filter", "excluded")
+            .build();
+        let metrics = tracer.imp().metrics.get().expect("active metrics");
+        for factory in ["queue", "queue2"] {
+            let included = gst::Pipeline::builder()
+                .name("event_cache_included")
+                .build();
+            let excluded = gst::Pipeline::builder()
+                .name("event_cache_excluded")
+                .build();
+            let branch = gst::Bin::builder().name("branch").build();
+            let queue = gst::ElementFactory::make(factory)
+                .name("observed")
+                .build()
+                .expect("queue");
+            branch.add(&queue).expect("parenting queue before its bin");
+            let assert_queue = |included: bool| {
+                let output = metrics.encode().expect("sampling queues");
+                let actual = output
+                    .lines()
+                    .filter(|line| line.starts_with("gstsmith_gstreamer_queue_level_buffers{"))
+                    .map(str::to_owned)
+                    .collect::<Vec<_>>();
+                let expected = if included {
+                    vec![format!(
+                        "gstsmith_gstreamer_queue_level_buffers{{element=\"{}\"}} 0",
+                        queue.path_string()
+                    )]
+                } else {
+                    Vec::new()
+                };
+                assert_eq!(actual, expected);
+            };
+            assert_queue(false);
+            included.add(&branch).expect("attaching bin");
+            assert_queue(true);
+            included.remove(&branch).expect("detaching bin");
+            assert_queue(false);
+            excluded
+                .add(&branch)
+                .expect("moving bin into excluded pipeline");
+            assert_queue(false);
+            excluded.set_property("name", "event_cache_restored");
+            assert_queue(true);
+            branch.remove(&queue).expect("removing queue");
+            assert_queue(false);
+            branch.add(&queue).expect("restoring queue");
+            assert_queue(true);
+        }
+        tracer.imp().dispose();
     }
 
     #[test]
