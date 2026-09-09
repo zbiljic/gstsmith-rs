@@ -78,17 +78,6 @@ enum IgnoreReason {
     SeriesLimit,
 }
 
-struct QueueEntry {
-    labels: ElementLabels,
-    element: glib::WeakRef<gst::Element>,
-    level_buffers: Gauge,
-    level_bytes: Gauge,
-    level_seconds: Gauge<f64, std::sync::atomic::AtomicU64>,
-    capacity_buffers: Gauge,
-    capacity_bytes: Gauge,
-    capacity_seconds: Gauge<f64, std::sync::atomic::AtomicU64>,
-}
-
 struct PipelineEntry {
     pipeline: glib::WeakRef<gst::Pipeline>,
     labels: Vec<PipelineLabels>,
@@ -114,7 +103,7 @@ pub(crate) struct Metrics {
     pads: papaya::HashMap<usize, PadEntry>,
     tracked_pad_count: Mutex<usize>,
     pipelines: RwLock<HashMap<usize, PipelineEntry>>,
-    queues: RwLock<HashMap<usize, QueueEntry>>,
+    queues: RwLock<HashMap<usize, glib::WeakRef<gst::Element>>>,
     include_filter: Option<Regex>,
     exclude_filter: Option<Regex>,
     max_pad_series: usize,
@@ -430,40 +419,38 @@ impl Metrics {
     }
 
     pub(crate) fn track_queue(&self, element: &gst::Element) {
-        let identity = element.path_string().to_string();
-        if !self.included(&identity) {
-            return;
-        }
-        let key = element.as_ptr() as usize;
-        self.queues.write().entry(key).or_insert_with(|| {
-            let labels = ElementLabels {
-                element: identity.into(),
-            };
-            QueueEntry {
-                element: element.downgrade(),
-                level_buffers: self.queue_level_buffers.get_or_create(&labels).clone(),
-                level_bytes: self.queue_level_bytes.get_or_create(&labels).clone(),
-                level_seconds: self.queue_level_seconds.get_or_create(&labels).clone(),
-                capacity_buffers: self.queue_capacity_buffers.get_or_create(&labels).clone(),
-                capacity_bytes: self.queue_capacity_bytes.get_or_create(&labels).clone(),
-                capacity_seconds: self.queue_capacity_seconds.get_or_create(&labels).clone(),
-                labels,
-            }
-        });
+        self.queues
+            .write()
+            .entry(element.as_ptr() as usize)
+            .or_insert_with(|| element.downgrade());
     }
 
-    pub(crate) fn refresh_queues(&self) {
+    fn refresh_queues(&self) {
+        // Rebuild queue series from current paths; ancestor bins may have moved.
+        self.queue_level_buffers.clear();
+        self.queue_level_bytes.clear();
+        self.queue_level_seconds.clear();
+        self.queue_capacity_buffers.clear();
+        self.queue_capacity_bytes.clear();
+        self.queue_capacity_seconds.clear();
         let snapshot = self
             .queues
             .read()
             .iter()
-            .map(|(key, entry)| (*key, entry.element.clone()))
+            .map(|(key, weak)| (*key, weak.clone()))
             .collect::<Vec<_>>();
         let mut stale = Vec::new();
         for (key, weak) in snapshot {
             let Some(element) = weak.upgrade() else {
                 stale.push(key);
                 continue;
+            };
+            let identity = element.path_string().to_string();
+            if !self.included(&identity) {
+                continue;
+            }
+            let labels = ElementLabels {
+                element: identity.into(),
             };
             let values = (
                 element.property::<u32>("current-level-buffers"),
@@ -473,18 +460,24 @@ impl Metrics {
                 element.property::<u32>("max-size-bytes"),
                 element.property::<u64>("max-size-time"),
             );
-            if let Some(entry) = self.queues.read().get(&key) {
-                entry.level_buffers.set(i64::from(values.0));
-                entry.level_bytes.set(i64::from(values.1));
-                entry
-                    .level_seconds
-                    .set(std::time::Duration::from_nanos(values.2).as_secs_f64());
-                entry.capacity_buffers.set(i64::from(values.3));
-                entry.capacity_bytes.set(i64::from(values.4));
-                entry
-                    .capacity_seconds
-                    .set(std::time::Duration::from_nanos(values.5).as_secs_f64());
-            }
+            self.queue_level_buffers
+                .get_or_create(&labels)
+                .set(i64::from(values.0));
+            self.queue_level_bytes
+                .get_or_create(&labels)
+                .set(i64::from(values.1));
+            self.queue_level_seconds
+                .get_or_create(&labels)
+                .set(std::time::Duration::from_nanos(values.2).as_secs_f64());
+            self.queue_capacity_buffers
+                .get_or_create(&labels)
+                .set(i64::from(values.3));
+            self.queue_capacity_bytes
+                .get_or_create(&labels)
+                .set(i64::from(values.4));
+            self.queue_capacity_seconds
+                .get_or_create(&labels)
+                .set(std::time::Duration::from_nanos(values.5).as_secs_f64());
         }
         for key in stale {
             self.remove_queue_key(key);
@@ -492,17 +485,12 @@ impl Metrics {
     }
 
     fn remove_queue_key(&self, key: usize) {
-        if let Some(entry) = self.queues.write().remove(&key) {
-            self.queue_level_buffers.remove(&entry.labels);
-            self.queue_level_bytes.remove(&entry.labels);
-            self.queue_level_seconds.remove(&entry.labels);
-            self.queue_capacity_buffers.remove(&entry.labels);
-            self.queue_capacity_bytes.remove(&entry.labels);
-            self.queue_capacity_seconds.remove(&entry.labels);
-        }
+        self.queues.write().remove(&key);
     }
 
     pub(crate) fn encode(&self) -> Result<String, std::fmt::Error> {
+        // Serialize refresh and encoding so concurrent scrapes see complete queue gauges.
+        let registry = self.registry.lock();
         self.refresh_pipeline_states();
         self.refresh_queues();
         #[cfg(test)]
@@ -514,7 +502,7 @@ impl Metrics {
             return Err(std::fmt::Error);
         }
         let mut output = String::new();
-        if let Err(error) = encode(&mut output, &self.registry.lock()) {
+        if let Err(error) = encode(&mut output, &registry) {
             self.encoding_failures.inc();
             return Err(error);
         }
@@ -761,6 +749,79 @@ mod tests {
         assert!(output.contains(" 42"));
         assert!(output.contains("gstsmith_gstreamer_queue_capacity_seconds"));
         assert!(output.contains(" 2.5"));
+    }
+
+    #[test]
+    fn queue_metrics_follow_nested_bin_paths_and_filters() {
+        gst::init().expect("initializing GStreamer");
+        let include = Regex::new("GstPipeline:included").expect("include regex");
+        let exclude = Regex::new("excluded").expect("exclude regex");
+        for factory in ["queue", "queue2"] {
+            for filtered in [false, true] {
+                let metrics = Metrics::new(
+                    filtered.then(|| include.clone()),
+                    filtered.then(|| exclude.clone()),
+                    1,
+                );
+                let sample = |queue: &gst::Element, capacity: u32| {
+                    format!(
+                        "gstsmith_gstreamer_queue_capacity_buffers{{element=\"{}\"}} {capacity}",
+                        queue.path_string()
+                    )
+                };
+                let [(first_bin, first), (second_bin, second)] = [11_u32, 22].map(|capacity| {
+                    let bin = gst::Bin::builder().name("branch").build();
+                    let queue = gst::ElementFactory::make(factory)
+                        .name("observed")
+                        .property("max-size-buffers", capacity)
+                        .build()
+                        .expect("constructing queue");
+                    bin.add(&queue)
+                        .expect("adding queue before parenting its bin");
+                    metrics.track_queue(&queue);
+                    (bin, queue)
+                });
+                let initial_label = format!("element=\"{}\"", first.path_string());
+                let _initial = metrics.encode().expect("sampling unparented bins");
+                let first_pipeline = gst::Pipeline::builder().name("included_first").build();
+                let second_pipeline = gst::Pipeline::builder().name("included_second").build();
+                let excluded = gst::Pipeline::builder().name("included_excluded").build();
+                first_pipeline.add(&first_bin).expect("parenting first bin");
+                second_pipeline
+                    .add(&second_bin)
+                    .expect("parenting second bin");
+
+                let output = metrics.encode().expect("sampling parented bins");
+                assert!(output.contains(&sample(&first, 11)), "{output}");
+                assert!(output.contains(&sample(&second, 22)), "{output}");
+                assert!(!output.contains(&initial_label), "{output}");
+
+                let old_sample = sample(&first, 11);
+                first_pipeline
+                    .remove(&first_bin)
+                    .expect("unparenting first bin");
+                excluded
+                    .add(&first_bin)
+                    .expect("moving bin into excluded pipeline");
+                let output = metrics.encode().expect("sampling reparented bin");
+                assert!(!output.contains(&old_sample), "{output}");
+                assert_eq!(output.contains(&sample(&first, 11)), !filtered, "{output}");
+                assert!(output.contains(&sample(&second, 22)), "{output}");
+
+                excluded
+                    .remove(&first_bin)
+                    .expect("unparenting excluded bin");
+                first_pipeline
+                    .add(&first_bin)
+                    .expect("restoring included bin");
+                let second_sample = sample(&second, 22);
+                second_bin.remove(&second).expect("removing second queue");
+                metrics.remove_object_key(second.as_ptr() as usize);
+                let output = metrics.encode().expect("sampling after queue removal");
+                assert!(output.contains(&sample(&first, 11)), "{output}");
+                assert!(!output.contains(&second_sample), "{output}");
+            }
+        }
     }
 
     #[test]

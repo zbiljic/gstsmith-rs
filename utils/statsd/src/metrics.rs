@@ -43,11 +43,6 @@ struct PipelineEntry {
     observed_transition: AtomicBool,
 }
 
-struct QueueEntry {
-    element: glib::WeakRef<gst::Element>,
-    name: String,
-}
-
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct PipelineSnapshot {
     pub(crate) pipeline: String,
@@ -71,7 +66,7 @@ pub(crate) struct Metrics {
     pads: papaya::HashMap<usize, PadEntry>,
     registration: Mutex<RegistrationState>,
     pipelines: RwLock<HashMap<usize, PipelineEntry>>,
-    queues: RwLock<HashMap<usize, QueueEntry>>,
+    queues: RwLock<HashMap<usize, glib::WeakRef<gst::Element>>>,
     include_filter: Option<Regex>,
     exclude_filter: Option<Regex>,
     max_pad_series: usize,
@@ -298,17 +293,10 @@ impl Metrics {
     }
 
     pub(crate) fn track_queue(&self, element: &gst::Element) {
-        let raw = element.path_string().to_string();
-        if !self.included(&raw) {
-            return;
-        }
         self.queues
             .write()
             .entry(element.as_ptr() as usize)
-            .or_insert_with(|| QueueEntry {
-                element: element.downgrade(),
-                name: sanitize_tag_value(&raw),
-            });
+            .or_insert_with(|| element.downgrade());
     }
 
     pub(crate) fn queue_snapshots(&self) -> Vec<QueueSnapshot> {
@@ -316,14 +304,18 @@ impl Metrics {
             .queues
             .read()
             .iter()
-            .map(|(key, entry)| (*key, entry.element.clone(), entry.name.clone()))
+            .map(|(key, weak)| (*key, weak.clone()))
             .collect::<Vec<_>>();
         let mut result = Vec::with_capacity(snapshot.len());
         let mut stale = Vec::new();
-        for (key, weak, name) in snapshot {
+        for (key, weak) in snapshot {
             if let Some(element) = weak.upgrade() {
+                let identity = element.path_string();
+                if !self.included(&identity) {
+                    continue;
+                }
                 result.push(QueueSnapshot {
-                    element: name,
+                    element: sanitize_tag_value(&identity),
                     level_buffers: element.property("current-level-buffers"),
                     level_bytes: element.property("current-level-bytes"),
                     level_seconds: Duration::from_nanos(element.property("current-level-time"))
@@ -434,6 +426,86 @@ mod tests {
         });
         assert_eq!(metrics.active_pads().len(), 2);
         assert_eq!(metrics.untracked_series_limit.load(Ordering::Relaxed), 6);
+    }
+
+    #[test]
+    fn queue_metrics_follow_nested_bin_paths_and_filters() {
+        gst::init().expect("initializing GStreamer");
+        let include = Regex::new("GstPipeline:included").expect("include regex");
+        let exclude = Regex::new("excluded").expect("exclude regex");
+        for factory in ["queue", "queue2"] {
+            for filtered in [false, true] {
+                let (metrics, _retired) = Metrics::new(
+                    filtered.then(|| include.clone()),
+                    filtered.then(|| exclude.clone()),
+                    1,
+                );
+                let has_queue =
+                    |snapshots: &[QueueSnapshot], queue: &gst::Element, capacity: u32| {
+                        snapshots.iter().any(|snapshot| {
+                            snapshot.element == sanitize_tag_value(&queue.path_string())
+                                && snapshot.capacity_buffers == capacity
+                        })
+                    };
+                let [(first_bin, first), (second_bin, second)] = [11_u32, 22].map(|capacity| {
+                    let bin = gst::Bin::builder().name("branch").build();
+                    let queue = gst::ElementFactory::make(factory)
+                        .name("observed")
+                        .property("max-size-buffers", capacity)
+                        .build()
+                        .expect("constructing queue");
+                    bin.add(&queue)
+                        .expect("adding queue before parenting its bin");
+                    metrics.track_queue(&queue);
+                    (bin, queue)
+                });
+                let _initial = metrics.queue_snapshots();
+                let first_pipeline = gst::Pipeline::builder().name("included_first").build();
+                let second_pipeline = gst::Pipeline::builder().name("included_second").build();
+                let excluded = gst::Pipeline::builder().name("included_excluded").build();
+                first_pipeline.add(&first_bin).expect("parenting first bin");
+                second_pipeline
+                    .add(&second_bin)
+                    .expect("parenting second bin");
+
+                let snapshots = metrics.queue_snapshots();
+                assert_eq!(snapshots.len(), 2);
+                assert!(has_queue(&snapshots, &first, 11), "{snapshots:?}");
+                assert!(has_queue(&snapshots, &second, 22), "{snapshots:?}");
+
+                let old_name = sanitize_tag_value(&first.path_string());
+                first_pipeline
+                    .remove(&first_bin)
+                    .expect("unparenting first bin");
+                excluded
+                    .add(&first_bin)
+                    .expect("moving bin into excluded pipeline");
+                let snapshots = metrics.queue_snapshots();
+                assert!(
+                    snapshots
+                        .iter()
+                        .all(|snapshot| snapshot.element != old_name)
+                );
+                assert_eq!(
+                    has_queue(&snapshots, &first, 11),
+                    !filtered,
+                    "{snapshots:?}"
+                );
+                assert!(has_queue(&snapshots, &second, 22), "{snapshots:?}");
+
+                excluded
+                    .remove(&first_bin)
+                    .expect("unparenting excluded bin");
+                first_pipeline
+                    .add(&first_bin)
+                    .expect("restoring included bin");
+                second_bin.remove(&second).expect("removing second queue");
+                metrics.remove_object_key(second.as_ptr() as usize);
+                let snapshots = metrics.queue_snapshots();
+                assert_eq!(snapshots.len(), 1);
+                assert!(has_queue(&snapshots, &first, 11), "{snapshots:?}");
+            }
+        }
     }
 
     #[test]
