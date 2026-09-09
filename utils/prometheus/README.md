@@ -70,6 +70,11 @@ rate(gstsmith_gstreamer_pad_push_buffers_total[1m])
 rate(gstsmith_gstreamer_pad_push_bytes_total[1m]) * 8
 ```
 
+Queue identities and filters refresh after bin additions/removals and renames.
+Direct `GstObject` parenting outside bin APIs is detected by a fallback check at
+the first scrape at least 30 seconds after the previous check. Queue levels
+and configured limits remain current at each scrape.
+
 ## Scope and security
 
 The endpoint serves plaintext HTTP without authentication. Keep the default
