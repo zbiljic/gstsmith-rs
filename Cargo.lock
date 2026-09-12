@@ -3700,9 +3700,9 @@ dependencies = [
 
 [[package]]
 name = "s2-sdk"
-version = "0.34.3"
+version = "0.34.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9b6e4ce57507c707f66479473987778e1fd3739c282f58534a6dccdf23305586"
+checksum = "7a07311630b2833ff2cee5e6241a7bb93e8d46ae48dc6a1328bc7da46bd51301"
 dependencies = [
  "async-compression",
  "async-stream",
@@ -3710,6 +3710,7 @@ dependencies = [
  "bytes",
  "futures-core",
  "futures-util",
+ "h2",
  "http",
  "http-body",
  "http-body-util",
@@ -4252,7 +4253,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
- "getrandom 0.3.4",
+ "getrandom 0.4.3",
  "once_cell",
  "rustix",
  "windows-sys 0.61.2",
