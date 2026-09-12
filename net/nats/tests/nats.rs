@@ -292,7 +292,12 @@ fn permission_denying_server(
             .expect("sending server info");
         let mut reader = tokio::io::BufReader::new(reader);
         let mut line = String::new();
-        while reader.read_line(&mut line).await.expect("reading command") != 0 {
+        let mut denied = false;
+        while match reader.read_line(&mut line).await {
+            // The rejected client may reset its connection during teardown.
+            Err(error) if denied && error.kind() == std::io::ErrorKind::ConnectionReset => false,
+            result => result.expect("reading command") != 0,
+        } {
             let response = if line.starts_with("PING") {
                 &b"PONG\r\n"[..]
             } else if line.starts_with("SUB ") {
@@ -316,6 +321,7 @@ fn permission_denying_server(
                 &b""[..]
             };
             writer.write_all(response).await.expect("sending response");
+            denied |= response.starts_with(b"-ERR ");
             line.clear();
         }
     });
