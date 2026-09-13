@@ -40,6 +40,10 @@
       "semanticCommitType": "ci"
     },
     {
+      "matchManagers": ["cargo"],
+      "rangeStrategy": "bump"
+    },
+    {
       "description": ["Do not require release age for dependency pins"],
       "matchUpdateTypes": ["pin"],
       "minimumReleaseAge": null
