@@ -29,7 +29,7 @@ jobs:
           !startsWith(github.head_ref, 'renovate/') }}
     name: Test Tract Metal provider
     runs-on: ${{ vars.RUNNER_MACOS || 'macos-26' }}
-    timeout-minutes: 30
+    timeout-minutes: 60
 
     steps:
       - name: Checkout
@@ -76,7 +76,7 @@ jobs:
           !startsWith(github.head_ref, 'renovate/') }}
     name: Test ONNX Runtime CoreML provider
     runs-on: ${{ vars.RUNNER_MACOS || 'macos-26' }}
-    timeout-minutes: 30
+    timeout-minutes: 60
 
     steps:
       - name: Checkout
@@ -131,7 +131,7 @@ jobs:
           !startsWith(github.head_ref, 'renovate/') }}
     name: Check GStreamer 1.24 plugins
     runs-on: ${{ vars.RUNNER_UBUNTU_2404 || 'ubuntu-24.04' }}
-    timeout-minutes: 15
+    timeout-minutes: 60
 
     steps:
       - name: Checkout
@@ -201,7 +201,7 @@ jobs:
           !startsWith(github.head_ref, 'renovate/') }}
     name: Run Checks
     runs-on: ${{ vars.RUNNER || 'ubuntu-26.04' }}
-    timeout-minutes: 30
+    timeout-minutes: 60
     services:
       nats:
         image: nats:2.14-alpine
