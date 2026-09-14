@@ -30,7 +30,7 @@ futures-util = "0.3"
 gst = { workspace = true }
 gst-base = { workspace = true }
 reqwest = { version = "0.13", default-features = false, features = ["json", "stream", "rustls-no-provider"] }
-rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+rustls = { version = "0.23.45", default-features = false, features = ["ring", "std", "tls12"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1.49", features = ["io-util", "net", "rt-multi-thread", "sync", "time"] }
