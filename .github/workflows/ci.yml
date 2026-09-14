@@ -28,7 +28,7 @@ jobs:
           github.event.pull_request.head.repo.full_name != github.repository ||
           !startsWith(github.head_ref, 'renovate/') }}
     name: Test Tract Metal provider
-    runs-on: macos-15
+    runs-on: ${{ vars.RUNNER_MACOS || 'macos-26' }}
     timeout-minutes: 30
 
     steps:
@@ -75,7 +75,7 @@ jobs:
           github.event.pull_request.head.repo.full_name != github.repository ||
           !startsWith(github.head_ref, 'renovate/') }}
     name: Test ONNX Runtime CoreML provider
-    runs-on: macos-15
+    runs-on: ${{ vars.RUNNER_MACOS || 'macos-26' }}
     timeout-minutes: 30
 
     steps:
@@ -130,7 +130,7 @@ jobs:
           github.event.pull_request.head.repo.full_name != github.repository ||
           !startsWith(github.head_ref, 'renovate/') }}
     name: Check GStreamer 1.24 plugins
-    runs-on: ubuntu-24.04
+    runs-on: ${{ vars.RUNNER_UBUNTU_2404 || 'ubuntu-24.04' }}
     timeout-minutes: 15
 
     steps:
