@@ -156,6 +156,8 @@ jobs:
 
       - name: Cache Rust dependencies
         uses: Swatinem/rust-cache@v2
+        with:
+          cache-targets: false
 
       - name: Check GStreamer 1.24 plugins
         run: |
@@ -235,6 +237,8 @@ jobs:
 
       - name: Cache Rust dependencies
         uses: Swatinem/rust-cache@v2
+        with:
+          cache-targets: false
 
       - name: Check dependency policy
         run: mise run deps:check
