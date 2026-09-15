@@ -25,7 +25,7 @@ requires_private = "gstreamer-1.0, gstreamer-base-1.0, gobject-2.0, glib-2.0, gm
 
 [dependencies]
 async-nats = { version = "0.50", default-features = false, features = ["ring", "nkeys"] }
-futures-util = "0.3"
+futures-util = "0.3.34"
 gst = { workspace = true }
 gst-base = { workspace = true }
 tokio = { version = "1.49", features = ["io-util", "net", "rt-multi-thread", "sync", "time"] }
