@@ -29,7 +29,7 @@ gst-analytics = { workspace = true, features = ["v1_28"] }
 gst-base = { workspace = true, features = ["v1_28"] }
 gst-inference-common = { path = "../inference-common" }
 gst-video = { workspace = true, features = ["v1_28"] }
-half = "2.6.0"
+half = "2.7.1"
 ort = { version = "=2.0.0-rc.13", default-features = false, features = ["std", "download-binaries", "copy-dylibs", "tls-native", "api-27", "half"] }
 
 [features]
