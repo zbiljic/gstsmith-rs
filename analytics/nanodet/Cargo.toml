@@ -24,7 +24,7 @@ import_library = false
 requires_private = "gstreamer-1.0 >= 1.28, gstreamer-base-1.0 >= 1.28, gstreamer-video-1.0 >= 1.28, gstreamer-analytics-1.0 >= 1.28, gobject-2.0, glib-2.0, gmodule-2.0"
 
 [dependencies]
-byte-slice-cast = "1"
+byte-slice-cast = "1.2.3"
 gst = { workspace = true, features = ["v1_28"] }
 gst-analytics = { workspace = true, features = ["v1_28"] }
 gst-base = { workspace = true, features = ["v1_28"] }
