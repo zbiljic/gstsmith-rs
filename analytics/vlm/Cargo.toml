@@ -52,7 +52,7 @@ hyper = { version = "1", features = ["http1", "server"] }
 hyper-util = { version = "0.1", features = ["tokio"] }
 rcgen = "0.14.10"
 tempfile = "3.27.0"
-tokio-rustls = "0.26.4"
+tokio-rustls = "0.26.5"
 
 [lints]
 workspace = true
