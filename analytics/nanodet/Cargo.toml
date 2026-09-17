@@ -29,7 +29,7 @@ gst = { workspace = true, features = ["v1_28"] }
 gst-analytics = { workspace = true, features = ["v1_28"] }
 gst-base = { workspace = true, features = ["v1_28"] }
 gst-video = { workspace = true, features = ["v1_28"] }
-half = "2.6.0"
+half = "2.7.1"
 
 [features]
 static = []
