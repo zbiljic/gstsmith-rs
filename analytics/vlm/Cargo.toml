@@ -47,7 +47,7 @@ path = "src/lib.rs"
 
 [dev-dependencies]
 gst-check = { workspace = true }
-http-body-util = "0.1"
+http-body-util = "0.1.5"
 hyper = { version = "1", features = ["http1", "server"] }
 hyper-util = { version = "0.1", features = ["tokio"] }
 rcgen = "0.14.10"
