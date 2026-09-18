@@ -27,7 +27,7 @@ requires_private = "gstreamer-1.0, gobject-2.0, glib-2.0, gmodule-2.0"
 bytes = "1.12.1"
 gst = { workspace = true }
 http-body-util = "0.1.5"
-hyper = { version = "1", features = ["http1", "server"] }
+hyper = { version = "1.11.1", features = ["http1", "server"] }
 hyper-util = { version = "0.1", features = ["tokio"] }
 papaya = "0.2.4"
 parking_lot = "0.12"
