@@ -29,7 +29,7 @@ gst = { workspace = true }
 http-body-util = "0.1.5"
 hyper = { version = "1.11.1", features = ["http1", "server"] }
 hyper-util = { version = "0.1.20", features = ["tokio"] }
-papaya = "0.2.4"
+papaya = "0.2.5"
 parking_lot = "0.12"
 prometheus-client = "0.25.0"
 regex = "1"
