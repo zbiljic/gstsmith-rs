@@ -27,7 +27,7 @@ requires_private = "gstreamer-1.0, gobject-2.0, glib-2.0, gmodule-2.0"
 cadence = "1.8.0"
 gst = { workspace = true }
 papaya = "0.2.5"
-parking_lot = "0.12"
+parking_lot = "0.12.5"
 regex = "1"
 
 [features]
