@@ -28,7 +28,7 @@ cadence = "1.8.0"
 gst = { workspace = true }
 papaya = "0.2.5"
 parking_lot = "0.12.5"
-regex = "1"
+regex = "1.13.1"
 
 [features]
 static = []
