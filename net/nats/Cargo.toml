@@ -28,7 +28,7 @@ async-nats = { version = "0.50", default-features = false, features = ["ring", "
 futures-util = "0.3.34"
 gst = { workspace = true }
 gst-base = { workspace = true }
-tokio = { version = "1.49", features = ["io-util", "net", "rt-multi-thread", "sync", "time"] }
+tokio = { version = "1.53.1", features = ["io-util", "net", "rt-multi-thread", "sync", "time"] }
 tokio-util = "0.7"
 
 [features]
