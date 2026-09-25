@@ -25,12 +25,12 @@ rust-version = "1.96.0"
 version = "0.1.0"
 
 [workspace.dependencies]
-gst = { package = "gstreamer", version = "0.25.3", features = ["v1_24"] }
-gst-analytics = { package = "gstreamer-analytics", version = "0.25.2" }
-gst-base = { package = "gstreamer-base", version = "0.25.3", features = ["v1_24"] }
+gst = { package = "gstreamer", version = "0.25.4", features = ["v1_24"] }
+gst-analytics = { package = "gstreamer-analytics", version = "0.25.4" }
+gst-base = { package = "gstreamer-base", version = "0.25.4", features = ["v1_24"] }
 gst-check = { package = "gstreamer-check", version = "0.25.0", features = ["v1_24"] }
 gst-plugin-version-helper = "0.8.4"
-gst-video = { package = "gstreamer-video", version = "0.25.3", features = ["v1_24"] }
+gst-video = { package = "gstreamer-video", version = "0.25.4", features = ["v1_24"] }
 # Pin the upstream RTen 0.26 compatibility commit until the next ocrs release.
 ocrs = { git = "https://github.com/robertknight/ocrs", rev = "d3bcafb20fd6998bafdfd72130f76d1b8e606285" }
 rten = { version = "=0.26.0", default-features = false, features = ["rten_format"] }
