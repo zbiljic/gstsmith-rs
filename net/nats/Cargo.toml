@@ -29,7 +29,7 @@ futures-util = "0.3.34"
 gst = { workspace = true }
 gst-base = { workspace = true }
 tokio = { version = "1.53.1", features = ["io-util", "net", "rt-multi-thread", "sync", "time"] }
-tokio-util = "0.7"
+tokio-util = "0.7.19"
 
 [features]
 static = []
