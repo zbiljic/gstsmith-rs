@@ -3676,9 +3676,9 @@ dependencies = [
 
 [[package]]
 name = "s2-testcontainers"
-version = "0.42.13"
+version = "0.42.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "85c629b693b3de37b6b881c30ac75702d307ebf55b49079bcae606e617820947"
+checksum = "fe49a636f5eebb92b7d1973e7c2ef0fe59fdfb1188e539ffebb42ac2fc7ff066"
 dependencies = [
  "reqwest",
  "s2-sdk",
