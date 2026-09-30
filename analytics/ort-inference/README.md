@@ -8,6 +8,11 @@ contract as `tractinference`, including constant inputs, output subsets, and
 dimensions that bind the model's dynamic dimensions; see the
 [Tract inference README](../tract-inference/README.md#model-info-contract).
 
+`orttensorinference` runs tensor-input models with the same contract as
+[`tracttensorinference`](../tract-inference/README.md#tensor-input-inference)
+and the same ONNX Runtime properties as `ortinference`, except
+`model-channel-order`.
+
 `model-channel-order=rgb` is the READY-mutable default. Set
 `model-channel-order=bgr` for a model that expects BGR channel order. The
 property affects tensor preprocessing only: truthful RGB/BGR/RGBA/BGRA caps

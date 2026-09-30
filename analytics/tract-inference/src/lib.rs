@@ -4,9 +4,11 @@ use gst::glib;
 
 mod engine;
 mod tractinference;
+mod tracttensorinference;
 
 fn plugin_init(plugin: &gst::Plugin) -> Result<(), glib::BoolError> {
-    tractinference::register(plugin)
+    tractinference::register(plugin)?;
+    tracttensorinference::register(plugin)
 }
 
 gst::plugin_define!(

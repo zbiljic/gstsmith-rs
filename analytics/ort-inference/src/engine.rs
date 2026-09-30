@@ -1,9 +1,10 @@
 use std::path::Path;
 use std::sync::Mutex;
 
-use gst_inference_common::engine::{Engine, InputTensor, OwnedTensor};
+use gst_inference_common::engine::{Engine, InputTensor, OwnedTensor, TensorEngine, TensorValues};
 use gst_inference_common::model_info::{
-    ConstantInput, ConstantValue, ModelInfo, ScalarType, TensorDescription, dims_match,
+    ConstantInput, ConstantValue, ModelInfo, ScalarType, TensorDescription, TensorModelInfo,
+    dims_match,
 };
 #[cfg(feature = "coreml")]
 use ort::ep::ExecutionProvider;
@@ -52,19 +53,68 @@ impl EngineOptions {
 
 /// ORT's session API requires mutable access to run. The mutex serializes runs
 /// on one session and, importantly, owns all output copies before unlocking.
-pub struct OrtEngine {
+struct SessionPlan {
     session: Mutex<Session>,
-    input: TensorDescription,
     constants: Vec<ConstantInput>,
     outputs: Vec<TensorDescription>,
     /// Computes only the outputs model-info declares.
     run_options: RunOptions<HasSelectedOutputs>,
 }
 
+pub struct OrtEngine {
+    plan: SessionPlan,
+    input: TensorDescription,
+}
+
+pub struct OrtTensorEngine {
+    plan: SessionPlan,
+    inputs: Vec<TensorDescription>,
+}
+
 impl OrtEngine {
     pub fn load(
         model_file: &Path,
         info: &ModelInfo,
+        options: EngineOptions,
+    ) -> Result<Self, String> {
+        let input = info.input().clone();
+        let plan = SessionPlan::load(
+            model_file,
+            std::slice::from_ref(&input),
+            info.constants(),
+            info.outputs(),
+            options,
+        )?;
+        Ok(Self { plan, input })
+    }
+}
+
+impl OrtTensorEngine {
+    pub fn load(
+        model_file: &Path,
+        info: &TensorModelInfo,
+        options: EngineOptions,
+    ) -> Result<Self, String> {
+        let plan = SessionPlan::load(
+            model_file,
+            info.inputs(),
+            info.constants(),
+            info.outputs(),
+            options,
+        )?;
+        Ok(Self {
+            plan,
+            inputs: info.inputs().to_vec(),
+        })
+    }
+}
+
+impl SessionPlan {
+    fn load(
+        model_file: &Path,
+        provided: &[TensorDescription],
+        constants: &[ConstantInput],
+        outputs: &[TensorDescription],
         options: EngineOptions,
     ) -> Result<Self, String> {
         let options = options.validate()?;
@@ -112,9 +162,8 @@ impl OrtEngine {
         let session = builder
             .commit_from_file(model_file)
             .map_err(|error| format!("failed to load ONNX model: {error}"))?;
-        validate_session(&session, info)?;
-        let selector = info
-            .outputs()
+        validate_session(&session, provided, constants, outputs)?;
+        let selector = outputs
             .iter()
             .fold(OutputSelector::no_default(), |selector, output| {
                 selector.with(output.name.as_str())
@@ -124,31 +173,19 @@ impl OrtEngine {
             .with_outputs(selector);
         Ok(Self {
             session: Mutex::new(session),
-            input: info.input().clone(),
-            constants: info.constants().to_vec(),
-            outputs: info.outputs().to_vec(),
+            constants: constants.to_vec(),
+            outputs: outputs.to_vec(),
             run_options,
         })
     }
-}
 
-impl Engine for OrtEngine {
-    fn run(&self, input: InputTensor) -> Result<Vec<OwnedTensor>, String> {
-        let input_value = match (self.input.data_type, input) {
-            (ScalarType::Float32, InputTensor::Float32(values)) => {
-                Tensor::from_array((self.input.dims.clone(), values))
-                    .map(ort::value::Value::into_dyn)
-            }
-            (ScalarType::Uint8, InputTensor::Uint8(values)) => {
-                Tensor::from_array((self.input.dims.clone(), values))
-                    .map(ort::value::Value::into_dyn)
-            }
-            _ => return Err("preprocessor produced the wrong input scalar type".to_owned()),
-        }
-        .map_err(|error| format!("failed to construct ORT input tensor: {error}"))?;
+    /// Run with the provided inputs (name, value) plus the constants.
+    fn run(&self, provided: Vec<(&str, ort::value::DynValue)>) -> Result<Vec<OwnedTensor>, String> {
         let mut inputs: Vec<(std::borrow::Cow<'_, str>, SessionInputValue<'_>)> =
-            Vec::with_capacity(1 + self.constants.len());
-        inputs.push((self.input.name.as_str().into(), input_value.into()));
+            Vec::with_capacity(provided.len() + self.constants.len());
+        for (name, value) in provided {
+            inputs.push((name.into(), value.into()));
+        }
         for constant in &self.constants {
             inputs.push((
                 constant.description.name.as_str().into(),
@@ -182,6 +219,90 @@ impl Engine for OrtEngine {
             })
             .collect()
     }
+}
+
+impl Engine for OrtEngine {
+    fn run(&self, input: InputTensor) -> Result<Vec<OwnedTensor>, String> {
+        let input_value = match (self.input.data_type, input) {
+            (ScalarType::Float32, InputTensor::Float32(values)) => {
+                Tensor::from_array((self.input.dims.clone(), values))
+                    .map(ort::value::Value::into_dyn)
+            }
+            (ScalarType::Uint8, InputTensor::Uint8(values)) => {
+                Tensor::from_array((self.input.dims.clone(), values))
+                    .map(ort::value::Value::into_dyn)
+            }
+            _ => return Err("preprocessor produced the wrong input scalar type".to_owned()),
+        }
+        .map_err(|error| format!("failed to construct ORT input tensor: {error}"))?;
+        self.plan.run(vec![(self.input.name.as_str(), input_value)])
+    }
+}
+
+impl TensorEngine for OrtTensorEngine {
+    fn run(&self, inputs: &[OwnedTensor]) -> Result<Vec<OwnedTensor>, String> {
+        let provided = inputs
+            .iter()
+            .zip(&self.inputs)
+            .map(|(input, description)| {
+                owned_tensor_value(input).map(|value| (description.name.as_str(), value))
+            })
+            .collect::<Result<Vec<_>, String>>()?;
+        self.plan.run(provided)
+    }
+}
+
+/// An ORT tensor with the owned tensor's type, shape, and values.
+fn owned_tensor_value(input: &OwnedTensor) -> Result<ort::value::DynValue, String> {
+    let dims = input.description.dims.clone();
+    let value = match TensorValues::decode(input)? {
+        TensorValues::Float16(bits) => Tensor::from_array((
+            dims,
+            bits.into_iter()
+                .map(half::f16::from_bits)
+                .collect::<Vec<_>>(),
+        ))
+        .map(ort::value::Value::into_dyn),
+        TensorValues::Float32(values) => {
+            Tensor::from_array((dims, values)).map(ort::value::Value::into_dyn)
+        }
+        TensorValues::Float64(values) => {
+            Tensor::from_array((dims, values)).map(ort::value::Value::into_dyn)
+        }
+        TensorValues::Int8(values) => {
+            Tensor::from_array((dims, values)).map(ort::value::Value::into_dyn)
+        }
+        TensorValues::Int16(values) => {
+            Tensor::from_array((dims, values)).map(ort::value::Value::into_dyn)
+        }
+        TensorValues::Int32(values) => {
+            Tensor::from_array((dims, values)).map(ort::value::Value::into_dyn)
+        }
+        TensorValues::Int64(values) => {
+            Tensor::from_array((dims, values)).map(ort::value::Value::into_dyn)
+        }
+        TensorValues::Uint8(values) => {
+            Tensor::from_array((dims, values)).map(ort::value::Value::into_dyn)
+        }
+        TensorValues::Uint16(values) => {
+            Tensor::from_array((dims, values)).map(ort::value::Value::into_dyn)
+        }
+        TensorValues::Uint32(values) => {
+            Tensor::from_array((dims, values)).map(ort::value::Value::into_dyn)
+        }
+        TensorValues::Uint64(values) => {
+            Tensor::from_array((dims, values)).map(ort::value::Value::into_dyn)
+        }
+        TensorValues::Bool(values) => {
+            Tensor::from_array((dims, values)).map(ort::value::Value::into_dyn)
+        }
+    };
+    value.map_err(|error| {
+        format!(
+            "failed to construct ORT input tensor {}: {error}",
+            input.description.id
+        )
+    })
 }
 
 /// A constant input filled with its declared value.
@@ -218,13 +339,15 @@ fn constant_tensor(constant: &ConstantInput) -> Result<ort::value::DynValue, Str
 
 /// Every model input must be declared (the image or a constant) and every
 /// declared tensor must exist; outputs may be a declared subset.
-fn validate_session(session: &Session, info: &ModelInfo) -> Result<(), String> {
-    let declared_inputs = std::iter::once(info.input())
-        .chain(
-            info.constants()
-                .iter()
-                .map(|constant| &constant.description),
-        )
+fn validate_session(
+    session: &Session,
+    provided: &[TensorDescription],
+    constants: &[ConstantInput],
+    outputs: &[TensorDescription],
+) -> Result<(), String> {
+    let declared_inputs = provided
+        .iter()
+        .chain(constants.iter().map(|constant| &constant.description))
         .collect::<Vec<_>>();
     for (index, input) in session.inputs().iter().enumerate() {
         let description = declared_inputs
@@ -250,7 +373,7 @@ fn validate_session(session: &Session, info: &ModelInfo) -> Result<(), String> {
             ));
         }
     }
-    for (index, description) in info.outputs().iter().enumerate() {
+    for (index, description) in outputs.iter().enumerate() {
         let output = session
             .outputs()
             .iter()

@@ -1,29 +1,40 @@
-pub use gst_inference_common::engine::Engine;
+pub use gst_inference_common::engine::{Engine, TensorEngine};
 #[cfg(feature = "tract")]
-pub use gst_inference_common::engine::{InputTensor, OwnedTensor};
+pub use gst_inference_common::engine::{InputTensor, OwnedTensor, TensorValues};
 
 #[cfg(feature = "tract")]
 pub mod tract {
     use tract_onnx::prelude::*;
     use tract_onnx::tract_hir::infer::Factoid;
 
-    use super::{Engine, InputTensor, OwnedTensor};
+    use super::{Engine, InputTensor, OwnedTensor, TensorEngine, TensorValues};
     use crate::tractinference::imp::ExecutionProvider;
     use gst_inference_common::model_info::{
-        ConstantInput, ConstantValue, ModelInfo, ScalarType, TensorDescription, dims_match,
+        ConstantInput, ConstantValue, ModelInfo, ScalarType, TensorDescription, TensorModelInfo,
+        dims_match,
     };
 
     /// What feeds one model input, in model input order.
     enum Slot {
-        Image,
+        /// The provided input at this index.
+        Input(usize),
         Constant(TValue),
     }
 
-    pub struct TractEngine {
-        plan: std::sync::Arc<TypedRunnableModel>,
-        input: TensorDescription,
+    /// A runnable model whose inputs are provided tensors and constants.
+    struct Plan {
+        runnable: std::sync::Arc<TypedRunnableModel>,
         slots: Vec<Slot>,
         outputs: Vec<TensorDescription>,
+    }
+
+    pub struct TractEngine {
+        plan: Plan,
+        input: TensorDescription,
+    }
+
+    pub struct TractTensorEngine {
+        plan: Plan,
     }
 
     impl TractEngine {
@@ -32,17 +43,53 @@ pub mod tract {
             info: &ModelInfo,
             execution_provider: ExecutionProvider,
         ) -> Result<Self, String> {
+            let input = info.input().clone();
+            let plan = Plan::load(
+                model_file,
+                std::slice::from_ref(&input),
+                info.constants(),
+                info.outputs(),
+                execution_provider,
+            )?;
+            Ok(Self { plan, input })
+        }
+    }
+
+    impl TractTensorEngine {
+        pub fn load(
+            model_file: &std::path::Path,
+            info: &TensorModelInfo,
+            execution_provider: ExecutionProvider,
+        ) -> Result<Self, String> {
+            let plan = Plan::load(
+                model_file,
+                info.inputs(),
+                info.constants(),
+                info.outputs(),
+                execution_provider,
+            )?;
+            Ok(Self { plan })
+        }
+    }
+
+    impl Plan {
+        fn load(
+            model_file: &std::path::Path,
+            provided: &[TensorDescription],
+            constants: &[ConstantInput],
+            outputs: &[TensorDescription],
+            execution_provider: ExecutionProvider,
+        ) -> Result<Self, String> {
             let mut model = tract_onnx::onnx()
                 .model_for_path(model_file)
                 .map_err(|error| format!("failed to load ONNX model: {error}"))?;
-            let input = info.input().clone();
-            let (slots, facts) = input_slots(&model, info)?;
+            let (slots, facts) = input_slots(&model, provided, constants)?;
             for (index, fact) in facts.into_iter().enumerate() {
                 model = model.with_input_fact(index, fact).map_err(|error| {
                     format!("failed to specialize model input {index}: {error}")
                 })?;
             }
-            let selected = output_outlets(&model, info)?;
+            let selected = output_outlets(&model, outputs)?;
             let model = model
                 .with_output_outlets(&selected)
                 .map_err(|error| format!("failed to select model outputs: {error}"))?;
@@ -53,40 +100,74 @@ pub mod tract {
             let model = model
                 .into_optimized()
                 .map_err(|error| format!("failed to optimize model: {error}"))?;
-
             let runtime_outputs = model
                 .output_outlets()
                 .map_err(|error| format!("failed to inspect model outputs: {error}"))?;
-            if runtime_outputs.len() != info.outputs().len() {
+            if runtime_outputs.len() != outputs.len() {
                 return Err(format!(
                     "model has {} outputs but model-info declares {}",
                     runtime_outputs.len(),
-                    info.outputs().len()
+                    outputs.len()
                 ));
             }
-            for (index, descriptor) in info.outputs().iter().enumerate() {
+            for (index, descriptor) in outputs.iter().enumerate() {
                 let fact = model
                     .output_fact(index)
                     .map_err(|error| format!("failed to inspect output {index}: {error}"))?;
                 validate_typed_fact(fact, descriptor, "output", index)?;
             }
-            let plan = model
+            let runnable = model
                 .into_runnable()
                 .map_err(|error| format!("failed to create runnable model: {error}"))?;
             Ok(Self {
-                plan,
-                input,
+                runnable,
                 slots,
-                outputs: info.outputs().to_vec(),
+                outputs: outputs.to_vec(),
             })
+        }
+
+        /// Run with `provided` in the order the plan was loaded with.
+        fn run(&self, provided: Vec<TValue>) -> Result<Vec<OwnedTensor>, String> {
+            let mut provided = provided.into_iter().map(Some).collect::<Vec<_>>();
+            let inputs = self
+                .slots
+                .iter()
+                .map(|slot| match slot {
+                    Slot::Input(index) => provided
+                        .get_mut(*index)
+                        .and_then(Option::take)
+                        .ok_or_else(|| format!("model input {index} was not provided")),
+                    Slot::Constant(value) => Ok(value.clone()),
+                })
+                .collect::<Result<TVec<_>, String>>()?;
+            let runtime_outputs = self
+                .runnable
+                .run(inputs)
+                .map_err(|error| format!("Tract execution failed: {error}"))?;
+            if runtime_outputs.len() != self.outputs.len() {
+                return Err("Tract returned an unexpected number of outputs".to_owned());
+            }
+            runtime_outputs
+                .into_iter()
+                .zip(&self.outputs)
+                .map(|(value, description)| {
+                    let tensor = value.into_tensor();
+                    let bytes = tensor_bytes(&tensor, description.data_type)?;
+                    Ok(OwnedTensor {
+                        description: description.clone(),
+                        bytes,
+                    })
+                })
+                .collect()
         }
     }
 
-    /// Map every model input to the image or a declared constant, validate it,
-    /// and derive the static fact model-info binds it to.
+    /// Map every model input to a provided input or a declared constant,
+    /// validate it, and derive the static fact model-info binds it to.
     fn input_slots(
         model: &InferenceModel,
-        info: &ModelInfo,
+        provided: &[TensorDescription],
+        constants: &[ConstantInput],
     ) -> Result<(Vec<Slot>, Vec<InferenceFact>), String> {
         let outlets = model
             .input_outlets()
@@ -96,10 +177,13 @@ pub mod tract {
         let mut names = Vec::with_capacity(outlets.len());
         for (index, outlet) in outlets.iter().enumerate() {
             let name = outlet_name(model, *outlet).unwrap_or_default();
-            let (description, slot) = if name == info.input().name {
-                (info.input(), Slot::Image)
-            } else if let Some(constant) = info
-                .constants()
+            let (description, slot) = if let Some((position, description)) = provided
+                .iter()
+                .enumerate()
+                .find(|(_, description)| description.name == name)
+            {
+                (description, Slot::Input(position))
+            } else if let Some(constant) = constants
                 .iter()
                 .find(|constant| constant.description.name == name)
             {
@@ -123,11 +207,9 @@ pub mod tract {
             slots.push(slot);
             names.push(name.to_owned());
         }
-        let declared = std::iter::once(info.input()).chain(
-            info.constants()
-                .iter()
-                .map(|constant| &constant.description),
-        );
+        let declared = provided
+            .iter()
+            .chain(constants.iter().map(|constant| &constant.description));
         for description in declared {
             if !names.contains(&description.name) {
                 return Err(format!(
@@ -140,11 +222,14 @@ pub mod tract {
     }
 
     /// The model outputs model-info declares, in model-info order.
-    fn output_outlets(model: &InferenceModel, info: &ModelInfo) -> Result<Vec<OutletId>, String> {
+    fn output_outlets(
+        model: &InferenceModel,
+        outputs: &[TensorDescription],
+    ) -> Result<Vec<OutletId>, String> {
         let outlets = model
             .output_outlets()
             .map_err(|error| format!("failed to inspect model outputs: {error}"))?;
-        info.outputs()
+        outputs
             .iter()
             .map(|description| {
                 outlets
@@ -222,37 +307,46 @@ pub mod tract {
                 }
                 _ => return Err("preprocessor produced the wrong input scalar type".to_owned()),
             };
-            let mut image = Some(TValue::from(tensor));
-            let inputs = self
-                .slots
-                .iter()
-                .map(|slot| match slot {
-                    Slot::Image => image
-                        .take()
-                        .ok_or_else(|| "model declares the image input twice".to_owned()),
-                    Slot::Constant(value) => Ok(value.clone()),
-                })
-                .collect::<Result<TVec<_>, String>>()?;
-            let runtime_outputs = self
-                .plan
-                .run(inputs)
-                .map_err(|error| format!("Tract execution failed: {error}"))?;
-            if runtime_outputs.len() != self.outputs.len() {
-                return Err("Tract returned an unexpected number of outputs".to_owned());
-            }
-            runtime_outputs
-                .into_iter()
-                .zip(&self.outputs)
-                .map(|(value, description)| {
-                    let tensor = value.into_tensor();
-                    let bytes = tensor_bytes(&tensor, description.data_type)?;
-                    Ok(OwnedTensor {
-                        description: description.clone(),
-                        bytes,
-                    })
-                })
-                .collect()
+            self.plan.run(vec![TValue::from(tensor)])
         }
+    }
+
+    impl TensorEngine for TractTensorEngine {
+        fn run(&self, inputs: &[OwnedTensor]) -> Result<Vec<OwnedTensor>, String> {
+            let values = inputs
+                .iter()
+                .map(|input| tensor_from_owned(input).map(TValue::from))
+                .collect::<Result<Vec<_>, String>>()?;
+            self.plan.run(values)
+        }
+    }
+
+    /// A Tract tensor with the owned tensor's type, shape, and values.
+    fn tensor_from_owned(input: &OwnedTensor) -> Result<Tensor, String> {
+        let dims = &input.description.dims;
+        let tensor = match TensorValues::decode(input)? {
+            TensorValues::Float16(bits) => Tensor::from_shape(
+                dims,
+                &bits.into_iter().map(f16::from_bits).collect::<Vec<_>>(),
+            ),
+            TensorValues::Float32(values) => Tensor::from_shape(dims, &values),
+            TensorValues::Float64(values) => Tensor::from_shape(dims, &values),
+            TensorValues::Int8(values) => Tensor::from_shape(dims, &values),
+            TensorValues::Int16(values) => Tensor::from_shape(dims, &values),
+            TensorValues::Int32(values) => Tensor::from_shape(dims, &values),
+            TensorValues::Int64(values) => Tensor::from_shape(dims, &values),
+            TensorValues::Uint8(values) => Tensor::from_shape(dims, &values),
+            TensorValues::Uint16(values) => Tensor::from_shape(dims, &values),
+            TensorValues::Uint32(values) => Tensor::from_shape(dims, &values),
+            TensorValues::Uint64(values) => Tensor::from_shape(dims, &values),
+            TensorValues::Bool(values) => Tensor::from_shape(dims, &values),
+        };
+        tensor.map_err(|error| {
+            format!(
+                "failed to make input tensor {}: {error}",
+                input.description.id
+            )
+        })
     }
 
     fn outlet_name(model: &InferenceModel, outlet: OutletId) -> Option<&str> {

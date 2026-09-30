@@ -145,3 +145,55 @@ dir=output
 Every model input must be declared, and model-info must not declare tensors
 the model lacks. Non-unit batch sizes, more than one image input, non-image
 models, and runtime/model-info shape or scalar-type mismatches are rejected.
+
+## Tensor-input inference
+
+`tracttensorinference` runs a model whose inputs are tensors produced
+upstream rather than video frames. It is an in-place transform accepting any
+caps: the payload, timestamps, flags, and existing metadata pass through, and
+the source caps gain the model's output group in the `tensors` field.
+
+Every non-constant model-info input is looked up by its `id` across the
+buffer's `GstTensorMeta`:
+
+- all inputs present: the model runs and its declared outputs are attached as
+  one new `GstTensorMeta` (input tensors stay on the buffer);
+- no input present: the buffer passes through untouched, so a producer that
+  only sometimes attaches inputs can share the stream;
+- only some present, or a type, dimension, order, or size mismatch: element
+  error.
+
+The model-info file is the same format without the image rules: any number
+of inputs of any supported type, no `ranges`, constant inputs as for images,
+and dimensions that bind the model's symbolic dimensions.
+
+```ini
+[modelinfo]
+version=1.0
+group-id=example-sequence-model
+
+[input_embs]
+id=example-embeddings
+type=float32
+dims=1,400,768
+dir=input
+
+[attention_mask]
+id=example-mask
+type=bool
+dims=1,400
+dir=input
+
+[scores]
+id=example-scores
+type=float32
+dims=1,400,2
+dir=output
+```
+
+`GStreamer` 1.28 cannot construct `bool` tensors (`gst_tensor_set_simple`
+accepts types up to `bfloat16`), so a `type=bool` tensor travels in
+`GstTensorMeta` and in tensor caps as `uint8` holding 0 or 1, in both
+directions. `model-file`, `model-info-file`, and `execution-provider` behave
+as for `tractinference`.
+

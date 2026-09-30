@@ -4,9 +4,11 @@ use gst::glib;
 
 mod engine;
 mod ortinference;
+mod orttensorinference;
 
 fn plugin_init(plugin: &gst::Plugin) -> Result<(), glib::BoolError> {
-    ortinference::register(plugin)
+    ortinference::register(plugin)?;
+    orttensorinference::register(plugin)
 }
 
 gst::plugin_define!(

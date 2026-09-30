@@ -42,6 +42,17 @@ impl ScalarType {
         matches!(self, Self::Float32 | Self::Uint8)
     }
 
+    /// Bytes per element; `bool` is one byte (0 or 1).
+    #[must_use]
+    pub fn size(self) -> usize {
+        match self {
+            Self::Int8 | Self::Uint8 | Self::Bool => 1,
+            Self::Float16 | Self::Int16 | Self::Uint16 => 2,
+            Self::Float32 | Self::Int32 | Self::Uint32 => 4,
+            Self::Float64 | Self::Int64 | Self::Uint64 => 8,
+        }
+    }
+
     #[must_use]
     pub fn as_caps_name(self) -> &'static str {
         match self {
@@ -157,63 +168,101 @@ pub struct ModelInfo {
     outputs: Vec<TensorDescription>,
 }
 
+/// Which kind of model a model-info describes.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ModelKind {
+    /// One image input packed from video frames (`ranges` required).
+    Image,
+    /// Inputs taken from upstream tensors (no `ranges`, any scalar type).
+    Tensor,
+}
+
+/// The sections of a model-info file, split by role.
+struct ParsedModel {
+    group_id: String,
+    inputs: Vec<TensorDescription>,
+    constants: Vec<ConstantInput>,
+    outputs: Vec<TensorDescription>,
+}
+
+fn parse_model(contents: &str, kind: ModelKind) -> Result<ParsedModel, String> {
+    let sections = parse_sections(contents)?;
+    let header = sections
+        .first()
+        .filter(|section| section.name == "modelinfo")
+        .ok_or_else(|| "model-info must start with a [modelinfo] section".to_owned())?;
+    require(header, "version", "modelinfo").and_then(|version| {
+        if version == "1.0" {
+            Ok(())
+        } else {
+            Err(format!("unsupported model-info version {version:?}"))
+        }
+    })?;
+    let group_id = non_empty(require(header, "group-id", "modelinfo")?, "group-id")?.to_owned();
+    let mut ids = BTreeSet::new();
+    let mut names = BTreeSet::new();
+    let mut inputs = Vec::new();
+    let mut constants = Vec::new();
+    let mut outputs = Vec::new();
+    for section in sections.iter().skip(1) {
+        if !names.insert(section.name.clone()) {
+            return Err(format!("duplicate tensor {:?}", section.name));
+        }
+        let tensor = parse_tensor(section, kind)?;
+        if !ids.insert(tensor.description.id.clone()) {
+            return Err(format!("duplicate tensor id {:?}", tensor.description.id));
+        }
+        match (tensor.direction, tensor.constant) {
+            (Direction::Output, _) => outputs.push(tensor.description),
+            (Direction::Input, Some(value)) => constants.push(ConstantInput {
+                description: tensor.description,
+                value,
+            }),
+            (Direction::Input, None) => inputs.push(tensor.description),
+        }
+    }
+    if outputs.is_empty() {
+        return Err("at least one output is required".to_owned());
+    }
+    Ok(ParsedModel {
+        group_id,
+        inputs,
+        constants,
+        outputs,
+    })
+}
+
 impl ModelInfo {
     pub fn parse(contents: &str) -> Result<Self, String> {
-        let sections = parse_sections(contents)?;
-        let header = sections
-            .first()
-            .filter(|section| section.name == "modelinfo")
-            .ok_or_else(|| "model-info must start with a [modelinfo] section".to_owned())?;
-        require(header, "version", "modelinfo").and_then(|version| {
-            if version == "1.0" {
-                Ok(())
-            } else {
-                Err(format!("unsupported model-info version {version:?}"))
-            }
-        })?;
-        let group_id = non_empty(require(header, "group-id", "modelinfo")?, "group-id")?.to_owned();
-        let mut ids = BTreeSet::new();
-        let mut names = BTreeSet::new();
-        let mut images = Vec::new();
-        let mut constants = Vec::new();
-        let mut outputs = Vec::new();
-        for section in sections.iter().skip(1) {
-            if !names.insert(section.name.clone()) {
-                return Err(format!("duplicate tensor {:?}", section.name));
-            }
-            let tensor = parse_tensor(section)?;
-            if !ids.insert(tensor.description.id.clone()) {
-                return Err(format!("duplicate tensor id {:?}", tensor.description.id));
-            }
-            match (tensor.direction, tensor.constant) {
-                (Direction::Output, _) => outputs.push(tensor.description),
-                (Direction::Input, Some(value)) => constants.push(ConstantInput {
-                    description: tensor.description,
-                    value,
-                }),
-                (Direction::Input, None) => images.push(tensor.description),
-            }
-        }
-        if images.len() != 1 {
+        let parsed = parse_model(contents, ModelKind::Image)?;
+        if parsed.inputs.len() != 1 {
             return Err(format!(
                 "exactly one non-constant (image) input is required, found {}",
-                images.len()
+                parsed.inputs.len()
             ));
         }
-        let input = images
+        let input = parsed
+            .inputs
             .into_iter()
             .next()
             .ok_or_else(|| "missing input".to_owned())?;
         validate_image_input(&input)?;
-        if outputs.is_empty() {
-            return Err("at least one output is required".to_owned());
-        }
         Ok(Self {
-            group_id,
+            group_id: parsed.group_id,
             input,
-            constants,
-            outputs,
+            constants: parsed.constants,
+            outputs: parsed.outputs,
         })
+    }
+
+    /// The tensor group this model produces and the image size it requires.
+    #[must_use]
+    pub fn caps_contract(&self) -> CapsContract<'_> {
+        CapsContract {
+            group_id: &self.group_id,
+            outputs: &self.outputs,
+            image: self.image_dimensions().ok(),
+        }
     }
 
     #[must_use]
@@ -244,13 +293,80 @@ impl ModelInfo {
     }
 }
 
+/// The tensor group an element produces, and the image size (width, height)
+/// its input video must have, for image models.
+#[derive(Clone, Copy, Debug)]
+pub struct CapsContract<'a> {
+    pub group_id: &'a str,
+    pub outputs: &'a [TensorDescription],
+    pub image: Option<(usize, usize)>,
+}
+
+/// Model-info of a tensor-input model: every non-constant input is taken,
+/// by tensor id, from upstream `GstTensorMeta`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct TensorModelInfo {
+    group_id: String,
+    inputs: Vec<TensorDescription>,
+    constants: Vec<ConstantInput>,
+    outputs: Vec<TensorDescription>,
+}
+
+impl TensorModelInfo {
+    pub fn parse(contents: &str) -> Result<Self, String> {
+        let parsed = parse_model(contents, ModelKind::Tensor)?;
+        if parsed.inputs.is_empty() {
+            return Err("at least one non-constant input is required".to_owned());
+        }
+        Ok(Self {
+            group_id: parsed.group_id,
+            inputs: parsed.inputs,
+            constants: parsed.constants,
+            outputs: parsed.outputs,
+        })
+    }
+
+    #[must_use]
+    pub fn group_id(&self) -> &str {
+        &self.group_id
+    }
+
+    /// Inputs read from upstream tensors, in model-info order.
+    #[must_use]
+    pub fn inputs(&self) -> &[TensorDescription] {
+        &self.inputs
+    }
+
+    /// Inputs the element supplies itself, in model-info order.
+    #[must_use]
+    pub fn constants(&self) -> &[ConstantInput] {
+        &self.constants
+    }
+
+    /// Outputs to compute and attach, in model-info order.
+    #[must_use]
+    pub fn outputs(&self) -> &[TensorDescription] {
+        &self.outputs
+    }
+
+    /// The tensor group this model produces; there is no image constraint.
+    #[must_use]
+    pub fn caps_contract(&self) -> CapsContract<'_> {
+        CapsContract {
+            group_id: &self.group_id,
+            outputs: &self.outputs,
+            image: None,
+        }
+    }
+}
+
 struct ParsedTensor {
     direction: Direction,
     description: TensorDescription,
     constant: Option<ConstantValue>,
 }
 
-fn parse_tensor(section: &Section) -> Result<ParsedTensor, String> {
+fn parse_tensor(section: &Section, kind: ModelKind) -> Result<ParsedTensor, String> {
     let name = section.name.as_str();
     let direction = match require(section, "dir", name)? {
         "input" => Direction::Input,
@@ -267,6 +383,14 @@ fn parse_tensor(section: &Section) -> Result<ParsedTensor, String> {
     let data_type = ScalarType::parse(require(section, "type", name)?)?;
     let constant = section.values.get("constant");
     let ranges = match (direction, constant) {
+        (Direction::Input, None) if kind == ModelKind::Tensor => {
+            if section.values.contains_key("ranges") {
+                return Err(format!(
+                    "tensor input {name:?} must not declare ranges; tensors are used as is"
+                ));
+            }
+            Vec::new()
+        }
         (Direction::Input, None) => {
             if !data_type.is_supported_input() {
                 return Err(format!(
@@ -595,6 +719,45 @@ mod tests {
         assert!(dims_match(&[None, None, Some(3)], &[1, 400, 3]));
         assert!(!dims_match(&[None, Some(768)], &[1, 400]));
         assert!(!dims_match(&[None, None], &[1, 2, 3]));
+    }
+
+    const TENSOR_MODEL: &str = "[modelinfo]\nversion=1.0\ngroup-id=tensor-group\n\n[input_embs]\nid=embeddings\ntype=float32\ndims=1,400,768\ndir=input\n\n[attention_mask]\nid=mask\ntype=bool\ndims=1,400\ndir=input\n\n[scale]\nid=scale\ntype=float32\ndims=1\ndir=input\nconstant=0.5\n\n[scores]\nid=scores\ntype=float32\ndims=1,400,2\ndir=output\n";
+
+    #[test]
+    fn parses_tensor_models_with_several_inputs() {
+        let info = TensorModelInfo::parse(TENSOR_MODEL).expect("tensor model parses");
+        assert_eq!(info.group_id(), "tensor-group");
+        let inputs = info
+            .inputs()
+            .iter()
+            .map(|i| (i.id.as_str(), i.data_type))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            inputs,
+            [
+                ("embeddings", ScalarType::Float32),
+                ("mask", ScalarType::Bool)
+            ]
+        );
+        assert_eq!(info.constants()[0].value, ConstantValue::Float32(0.5));
+        assert_eq!(info.outputs()[0].dims, [1, 400, 2]);
+        assert_eq!(info.caps_contract().image, None);
+    }
+
+    #[test]
+    fn rejects_invalid_tensor_models() {
+        for invalid in [
+            TENSOR_MODEL.replace("dir=input\n\n[attention_mask]", "dir=input\nranges=0,1\n\n[attention_mask]"),
+            TENSOR_MODEL.replace("dims=1,400,768", "dims=2,400,768"),
+            "[modelinfo]\nversion=1.0\ngroup-id=g\n\n[scores]\nid=scores\ntype=float32\ndims=1,2\ndir=output\n".to_owned(),
+        ] {
+            assert!(
+                TensorModelInfo::parse(&invalid).is_err(),
+                "accepted invalid tensor model-info:\n{invalid}"
+            );
+        }
+        let image = ModelInfo::parse(VALID).expect("image model-info parses");
+        assert_eq!(image.caps_contract().image, Some((3, 2)));
     }
 
     #[test]

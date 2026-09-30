@@ -38,11 +38,15 @@ and elements written in Rust.
     inference using Tract.
     - `tractinference`: Run a static single-image ONNX model with Tract and
       attach its raw output tensors as `GstTensorMeta`.
+    - `tracttensorinference`: Run an ONNX model on tensors carried by
+      upstream `GstTensorMeta` and attach its output tensors.
   - [`ort-inference`](analytics/ort-inference/): Model-agnostic ONNX tensor
     inference using ONNX Runtime.
     - `ortinference`: Run the same model-info contract with ORT's CPU provider
       (or the optional CoreML provider) and attach raw output tensors as
       `GstTensorMeta`.
+    - `orttensorinference`: Run a tensor-input model with ORT, like
+      `tracttensorinference`.
 
 - [`net`](net/)
 
