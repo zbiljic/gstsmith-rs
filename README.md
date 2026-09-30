@@ -16,6 +16,8 @@ and elements written in Rust.
   - [`jsontap`](generic/jsontap/): Passthrough inspection tap.
     - `jsontap`: Record every buffer (timestamps, flags, size, metas),
       caps change, and end of stream as one JSON line each.
+  - [`ptssampler`](generic/ptssampler/): Running-time period sampling.
+    - `ptssampler`: Pass the first buffer of every period and drop the rest.
 
 - [`analytics`](analytics/)
 

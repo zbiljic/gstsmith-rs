@@ -31,6 +31,7 @@ pc_dir="$libdir/pkgconfig"
 packages=(
   "gst-plugin-console|gstconsole|console|consolesrc consoleprint consolesink"
   "gst-plugin-jsontap|gstjsontap|jsontap|jsontap"
+  "gst-plugin-ptssampler|gstptssampler|ptssampler|ptssampler"
   "gst-plugin-lines|gstlines|lines|lineparse lineenc"
   "gst-plugin-nats|gstnats|nats|natssrc natssink"
   "gst-plugin-s2|gsts2|s2|s2src s2sink"
