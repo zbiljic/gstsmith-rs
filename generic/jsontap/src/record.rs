@@ -39,8 +39,9 @@ fn flags(flags: gst::BufferFlags) -> Value {
     )
 }
 
-/// A `GValue` as JSON: numbers, booleans, and strings natively, anything else
-/// in its `GStreamer` serialized form.
+/// A `GValue` as JSON: numbers, booleans, and strings natively, arrays and
+/// lists as JSON arrays, structures as objects, anything else in its
+/// `GStreamer` serialized form.
 fn value(value: &glib::SendValue) -> Value {
     if let Ok(v) = value.get::<bool>() {
         json!(v)
@@ -56,6 +57,12 @@ fn value(value: &glib::SendValue) -> Value {
         json!(v)
     } else if let Ok(v) = value.get::<String>() {
         json!(v)
+    } else if let Ok(v) = value.get::<gst::Array>() {
+        Value::Array(v.iter().map(self::value).collect())
+    } else if let Ok(v) = value.get::<gst::List>() {
+        Value::Array(v.iter().map(self::value).collect())
+    } else if let Ok(v) = value.get::<gst::Structure>() {
+        structure(&v)
     } else {
         value
             .serialize()
@@ -142,6 +149,15 @@ mod tests {
             meta.mut_structure().set("index", 7u64);
             meta.mut_structure().set("name", "x");
             meta.mut_structure().set("ratio", gst::Fraction::new(30, 1));
+            meta.mut_structure()
+                .set("events", gst::Array::new(["{\"a\":1}", "{\"b\":2}"]));
+            meta.mut_structure().set(
+                "nested",
+                gst::Structure::builder("n")
+                    .field("depth", 2i32)
+                    .field("tags", gst::List::new(["x", "y"]))
+                    .build(),
+            );
         }
 
         let record = buffer(3, &buf);
@@ -153,7 +169,13 @@ mod tests {
         assert_eq!(record["flags"], json!(["discont", "delta-unit"]));
         assert_eq!(
             record["metas"],
-            json!([{"api": "JsonTapTestMeta", "fields": {"index": 7, "name": "x", "ratio": "30/1"}}])
+            json!([{"api": "JsonTapTestMeta", "fields": {
+                "index": 7,
+                "name": "x",
+                "ratio": "30/1",
+                "events": ["{\"a\":1}", "{\"b\":2}"],
+                "nested": {"depth": 2, "tags": ["x", "y"]},
+            }}])
         );
     }
 }

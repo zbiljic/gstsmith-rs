@@ -20,8 +20,9 @@ unchanged; the element accepts any caps.
 
 Each entry of `metas` names the meta API. Custom metas (`GstCustomMeta`)
 are named by their registered name and include their structure `fields`:
-numbers, booleans, and strings as JSON values, anything else in its
-`GStreamer` serialized form.
+numbers, booleans, and strings as JSON values, arrays and lists as JSON
+arrays, nested structures as objects, anything else in its `GStreamer`
+serialized form.
 
 ```json
 {"kind":"buffer","seq":0,"pts":0,"dts":null,"duration":33333333,"offset":0,"offset_end":1,"flags":["discont"],"size":8294400,"metas":[{"api":"GstVideoMetaAPI"},{"api":"MyFrameMeta","fields":{"index":0}}]}
