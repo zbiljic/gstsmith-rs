@@ -13,6 +13,7 @@ pub enum ScalarType {
     Uint16,
     Uint32,
     Uint64,
+    Bool,
 }
 
 impl ScalarType {
@@ -29,8 +30,9 @@ impl ScalarType {
             "uint16" => Ok(Self::Uint16),
             "uint32" => Ok(Self::Uint32),
             "uint64" => Ok(Self::Uint64),
+            "bool" => Ok(Self::Bool),
             _ => Err(format!(
-                "unsupported scalar type {value:?}; supported output types are float16, float32, float64, int8, int16, int32, int64, uint8, uint16, uint32, and uint64"
+                "unsupported scalar type {value:?}; supported types are float16, float32, float64, int8, int16, int32, int64, uint8, uint16, uint32, uint64, and bool"
             )),
         }
     }
@@ -54,8 +56,57 @@ impl ScalarType {
             Self::Uint16 => "uint16",
             Self::Uint32 => "uint32",
             Self::Uint64 => "uint64",
+            Self::Bool => "bool",
         }
     }
+}
+
+/// The value an element supplies for a constant model input.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum ConstantValue {
+    Bool(bool),
+    Float32(f32),
+    Float64(f64),
+    Int32(i32),
+    Int64(i64),
+    Uint8(u8),
+}
+
+impl ConstantValue {
+    fn parse(value: &str, data_type: ScalarType) -> Result<Self, String> {
+        let invalid = || format!("invalid {} constant {value:?}", data_type.as_caps_name());
+        let finite = |parsed: f64| parsed.is_finite().then_some(parsed).ok_or_else(invalid);
+        match data_type {
+            ScalarType::Bool => match value {
+                "true" | "1" => Ok(Self::Bool(true)),
+                "false" | "0" => Ok(Self::Bool(false)),
+                _ => Err(invalid()),
+            },
+            ScalarType::Float32 => {
+                let parsed = value.parse::<f32>().map_err(|_error| invalid())?;
+                finite(f64::from(parsed)).map(|_| Self::Float32(parsed))
+            }
+            ScalarType::Float64 => value
+                .parse::<f64>()
+                .map_err(|_error| invalid())
+                .and_then(finite)
+                .map(Self::Float64),
+            ScalarType::Int32 => value.parse().map(Self::Int32).map_err(|_error| invalid()),
+            ScalarType::Int64 => value.parse().map(Self::Int64).map_err(|_error| invalid()),
+            ScalarType::Uint8 => value.parse().map(Self::Uint8).map_err(|_error| invalid()),
+            other => Err(format!(
+                "constant inputs of type {} are unsupported; use bool, float32, float64, int32, int64, or uint8",
+                other.as_caps_name()
+            )),
+        }
+    }
+}
+
+/// A model input the element fills with one value on every run.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ConstantInput {
+    pub description: TensorDescription,
+    pub value: ConstantValue,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -102,6 +153,7 @@ pub struct TensorDescription {
 pub struct ModelInfo {
     group_id: String,
     input: TensorDescription,
+    constants: Vec<ConstantInput>,
     outputs: Vec<TensorDescription>,
 }
 
@@ -121,83 +173,45 @@ impl ModelInfo {
         })?;
         let group_id = non_empty(require(header, "group-id", "modelinfo")?, "group-id")?.to_owned();
         let mut ids = BTreeSet::new();
-        let mut tensors = Vec::new();
+        let mut names = BTreeSet::new();
+        let mut images = Vec::new();
+        let mut constants = Vec::new();
+        let mut outputs = Vec::new();
         for section in sections.iter().skip(1) {
-            let direction = match require(section, "dir", &section.name)? {
-                "input" => Direction::Input,
-                "output" => Direction::Output,
-                value => {
-                    return Err(format!(
-                        "tensor {:?} has invalid dir {value:?}",
-                        section.name
-                    ));
-                }
-            };
-            let id = non_empty(require(section, "id", &section.name)?, "id")?.to_owned();
-            if !ids.insert(id.clone()) {
-                return Err(format!("duplicate tensor id {id:?}"));
+            if !names.insert(section.name.clone()) {
+                return Err(format!("duplicate tensor {:?}", section.name));
             }
-            let dims = parse_dims(require(section, "dims", &section.name)?)?;
-            if dims.first() != Some(&1) {
-                return Err(format!(
-                    "tensor {:?} must have a static batch dimension of one",
-                    section.name
-                ));
+            let tensor = parse_tensor(section)?;
+            if !ids.insert(tensor.description.id.clone()) {
+                return Err(format!("duplicate tensor id {:?}", tensor.description.id));
             }
-            let ranges = if direction == Direction::Input {
-                parse_ranges(require(section, "ranges", &section.name)?)?
-            } else {
-                Vec::new()
-            };
-            let data_type = ScalarType::parse(require(section, "type", &section.name)?)?;
-            if direction == Direction::Input && !data_type.is_supported_input() {
-                return Err(format!(
-                    "input tensor {:?} type {} is unsupported; inputs must be float32 or uint8",
-                    section.name,
-                    data_type.as_caps_name()
-                ));
+            match (tensor.direction, tensor.constant) {
+                (Direction::Output, _) => outputs.push(tensor.description),
+                (Direction::Input, Some(value)) => constants.push(ConstantInput {
+                    description: tensor.description,
+                    value,
+                }),
+                (Direction::Input, None) => images.push(tensor.description),
             }
-            tensors.push((
-                direction,
-                TensorDescription {
-                    name: section.name.clone(),
-                    id,
-                    data_type,
-                    dims,
-                    dim_order: DimOrder::parse(
-                        section.values.get("dims-order").map(String::as_str),
-                    )?,
-                    ranges,
-                },
-            ));
         }
-        let inputs: Vec<_> = tensors
-            .iter()
-            .filter(|(direction, _)| *direction == Direction::Input)
-            .map(|(_, tensor)| tensor.clone())
-            .collect();
-        if inputs.len() != 1 {
+        if images.len() != 1 {
             return Err(format!(
-                "exactly one input is required, found {}",
-                inputs.len()
+                "exactly one non-constant (image) input is required, found {}",
+                images.len()
             ));
         }
-        let input = inputs
+        let input = images
             .into_iter()
             .next()
             .ok_or_else(|| "missing input".to_owned())?;
         validate_image_input(&input)?;
-        let outputs: Vec<_> = tensors
-            .into_iter()
-            .filter(|(direction, _)| *direction == Direction::Output)
-            .map(|(_, tensor)| tensor)
-            .collect();
         if outputs.is_empty() {
             return Err("at least one output is required".to_owned());
         }
         Ok(Self {
             group_id,
             input,
+            constants,
             outputs,
         })
     }
@@ -210,17 +224,80 @@ impl ModelInfo {
     pub fn input(&self) -> &TensorDescription {
         &self.input
     }
+    /// Inputs the element supplies itself, in model-info order.
+    #[must_use]
+    pub fn constants(&self) -> &[ConstantInput] {
+        &self.constants
+    }
+
+    /// Outputs to compute and attach, in model-info order. A model may have
+    /// more outputs; undeclared ones are not computed.
     #[must_use]
     pub fn outputs(&self) -> &[TensorDescription] {
         &self.outputs
     }
 
     pub fn image_dimensions(&self) -> Result<(usize, usize), String> {
-        match self.input.dims.as_slice() {
-            [_, 3, height, width] | [_, height, width, 3] => Ok((*width, *height)),
-            _ => Err("input dimensions do not describe a static RGB image".to_owned()),
-        }
+        image_layout(&self.input.dims)
+            .map(|layout| (layout.width, layout.height))
+            .ok_or_else(|| "input dimensions do not describe a static RGB image".to_owned())
     }
+}
+
+struct ParsedTensor {
+    direction: Direction,
+    description: TensorDescription,
+    constant: Option<ConstantValue>,
+}
+
+fn parse_tensor(section: &Section) -> Result<ParsedTensor, String> {
+    let name = section.name.as_str();
+    let direction = match require(section, "dir", name)? {
+        "input" => Direction::Input,
+        "output" => Direction::Output,
+        value => return Err(format!("tensor {name:?} has invalid dir {value:?}")),
+    };
+    let id = non_empty(require(section, "id", name)?, "id")?.to_owned();
+    let dims = parse_dims(require(section, "dims", name)?)?;
+    if dims.first() != Some(&1) {
+        return Err(format!(
+            "tensor {name:?} must have a static batch dimension of one"
+        ));
+    }
+    let data_type = ScalarType::parse(require(section, "type", name)?)?;
+    let constant = section.values.get("constant");
+    let ranges = match (direction, constant) {
+        (Direction::Input, None) => {
+            if !data_type.is_supported_input() {
+                return Err(format!(
+                    "input tensor {name:?} type {} is unsupported; image inputs must be float32 or uint8",
+                    data_type.as_caps_name()
+                ));
+            }
+            parse_ranges(require(section, "ranges", name)?)?
+        }
+        (Direction::Input, Some(_)) if section.values.contains_key("ranges") => {
+            return Err(format!("constant input {name:?} must not declare ranges"));
+        }
+        (Direction::Output, Some(_)) => {
+            return Err(format!("output {name:?} must not declare a constant"));
+        }
+        _ => Vec::new(),
+    };
+    Ok(ParsedTensor {
+        direction,
+        constant: constant
+            .map(|value| ConstantValue::parse(value, data_type))
+            .transpose()?,
+        description: TensorDescription {
+            name: section.name.clone(),
+            id,
+            data_type,
+            dims,
+            dim_order: DimOrder::parse(section.values.get("dims-order").map(String::as_str))?,
+            ranges,
+        },
+    })
 }
 
 #[derive(Debug)]
@@ -342,14 +419,57 @@ fn parse_ranges(value: &str) -> Result<Vec<(f32, f32)>, String> {
     Ok(ranges)
 }
 
-fn validate_image_input(input: &TensorDescription) -> Result<(), String> {
-    if input.dims.len() != 4 {
-        return Err("the input tensor must have four dimensions".to_owned());
+/// Whether a model's tensor shape accepts the model-info dimensions: ranks
+/// agree, dynamic model dimensions (`None`) accept any declared size, and
+/// fixed ones must be equal. Model-info binds the dynamic dimensions.
+#[must_use]
+pub fn dims_match(model: &[Option<usize>], declared: &[usize]) -> bool {
+    model.len() == declared.len()
+        && model
+            .iter()
+            .zip(declared)
+            .all(|(model, declared)| model.is_none_or(|model| model == *declared))
+}
+
+/// How an image input packs one RGB frame.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ImageLayout {
+    pub channels_first: bool,
+    pub height: usize,
+    pub width: usize,
+}
+
+/// The layout of image input `dims`: unit leading dimensions (batch first,
+/// then any other unit dimensions such as a frame count) followed by
+/// `3,H,W` or `H,W,3`.
+#[must_use]
+pub fn image_layout(dims: &[usize]) -> Option<ImageLayout> {
+    let split = dims.len().checked_sub(3)?;
+    let (leading, image) = dims.split_at(split);
+    if leading.is_empty() || leading.iter().any(|dimension| *dimension != 1) {
+        return None;
     }
-    let channels_first = input.dims.get(1) == Some(&3);
-    let channels_last = input.dims.get(3) == Some(&3);
-    if channels_first == channels_last {
-        return Err("input dimensions must unambiguously describe three image channels".to_owned());
+    match image {
+        [3, height, width] if *width != 3 => Some(ImageLayout {
+            channels_first: true,
+            height: *height,
+            width: *width,
+        }),
+        [height, width, 3] if *height != 3 => Some(ImageLayout {
+            channels_first: false,
+            height: *height,
+            width: *width,
+        }),
+        _ => None,
+    }
+}
+
+fn validate_image_input(input: &TensorDescription) -> Result<(), String> {
+    if image_layout(&input.dims).is_none() {
+        return Err(
+            "input dimensions must be unit leading dimensions followed by an unambiguous 3,H,W or H,W,3 image"
+                .to_owned(),
+        );
     }
     if input.ranges.len() != 1 && input.ranges.len() != 3 {
         return Err("input ranges must contain one or three channel ranges".to_owned());
@@ -403,6 +523,86 @@ mod tests {
             return Err(std::io::Error::other("int32 input was accepted").into());
         }
         Ok(())
+    }
+
+    const CONSTANT: &str = "\n[mask]\nid=mask\ntype=bool\ndims=1,1\ndir=input\nconstant=true\n";
+
+    #[test]
+    fn accepts_leading_unit_dimensions_before_the_image() {
+        let info = ModelInfo::parse(&VALID.replacen("1,2,3,3", "1,1,3,2,4", 1))
+            .expect("five-dimensional image input parses");
+        assert_eq!(info.image_dimensions(), Ok((4, 2)));
+        assert_eq!(
+            image_layout(&[1, 1, 2, 4, 3]),
+            Some(ImageLayout {
+                channels_first: false,
+                height: 2,
+                width: 4
+            })
+        );
+        for invalid in [&[1, 2, 3, 4, 4][..], &[3, 4, 4], &[1, 3, 4, 3]] {
+            assert_eq!(image_layout(invalid), None, "{invalid:?}");
+        }
+    }
+
+    #[test]
+    fn parses_constant_inputs_beside_the_image() {
+        let info = ModelInfo::parse(&(VALID.to_owned() + CONSTANT)).expect("constant parses");
+        assert_eq!(info.input().id, "image");
+        let [constant] = info.constants() else {
+            panic!("one constant expected");
+        };
+        assert_eq!(constant.description.name, "mask");
+        assert_eq!(constant.description.data_type, ScalarType::Bool);
+        assert_eq!(constant.value, ConstantValue::Bool(true));
+        for (data_type, value, expected) in [
+            ("float32", "1.5", ConstantValue::Float32(1.5)),
+            ("int64", "-3", ConstantValue::Int64(-3)),
+            ("uint8", "7", ConstantValue::Uint8(7)),
+            ("bool", "0", ConstantValue::Bool(false)),
+        ] {
+            let text = VALID.to_owned()
+                + &CONSTANT
+                    .replace("type=bool", &format!("type={data_type}"))
+                    .replace("constant=true", &format!("constant={value}"));
+            let info = ModelInfo::parse(&text).expect("typed constant parses");
+            assert_eq!(info.constants()[0].value, expected);
+        }
+    }
+
+    #[test]
+    fn rejects_invalid_constants() {
+        for invalid in [
+            VALID.to_owned() + &CONSTANT.replace("constant=true", "constant=maybe"),
+            VALID.to_owned() + &CONSTANT.replace("type=bool", "type=float16"),
+            VALID.to_owned() + &CONSTANT.replace("constant=true", "constant=true\nranges=0,1"),
+            VALID.to_owned() + &CONSTANT.replace("[mask]", "[input]"),
+            VALID.replace(
+                "dir=output\n\n[second]",
+                "dir=output\nconstant=1\n\n[second]",
+            ),
+            VALID.replace("ranges=0,255;0,255;0,255", "constant=1"),
+        ] {
+            assert!(
+                ModelInfo::parse(&invalid).is_err(),
+                "accepted invalid constant model-info:\n{invalid}"
+            );
+        }
+    }
+
+    #[test]
+    fn declared_dimensions_bind_dynamic_model_dimensions() {
+        assert!(dims_match(&[None, None, Some(3)], &[1, 400, 3]));
+        assert!(!dims_match(&[None, Some(768)], &[1, 400]));
+        assert!(!dims_match(&[None, None], &[1, 2, 3]));
+    }
+
+    #[test]
+    fn requires_exactly_one_image_input() {
+        let two_images = VALID.to_owned()
+            + "\n[other]\nid=other\ntype=float32\ndims=1,3,2,2\ndir=input\nranges=0,1\n";
+        let error = ModelInfo::parse(&two_images).expect_err("two image inputs are rejected");
+        assert!(error.contains("exactly one non-constant"), "{error}");
     }
 
     #[test]

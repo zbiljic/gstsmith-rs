@@ -64,6 +64,7 @@ pub fn tensor_data_type(data_type: ScalarType) -> gst_analytics::TensorDataType 
         ScalarType::Uint16 => gst_analytics::TensorDataType::Uint16,
         ScalarType::Uint32 => gst_analytics::TensorDataType::Uint32,
         ScalarType::Uint64 => gst_analytics::TensorDataType::Uint64,
+        ScalarType::Bool => gst_analytics::TensorDataType::Bool,
     }
 }
 

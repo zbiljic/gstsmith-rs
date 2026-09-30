@@ -71,10 +71,12 @@ gst-launch-1.0 \
 By default, the element reads `<model-file>.modelinfo`; `model-info-file` can
 override that path. The model-info file uses format version `1.0`, preserves
 the tensor section order, and must describe exactly one static batch-one image
-input plus one or more static outputs. The accepted input video formats are
-RGB, BGR, RGBA, and BGRA. Inputs may be `float32` or `uint8`; outputs may be
-`float16`, `float32`, `float64`, `int8`, `int16`, `int32`, `int64`, `uint8`, `uint16`,
-`uint32`, or `uint64`. The unsupported GStreamer 1.28 scalar encodings
+input, any number of constant inputs, and one or more static outputs. Each
+section is named after the model tensor it describes. The accepted input
+video formats are RGB, BGR, RGBA, and BGRA. Image inputs may be `float32` or
+`uint8`; outputs may be `float16`, `float32`, `float64`, `int8`, `int16`,
+`int32`, `int64`, `uint8`, `uint16`, `uint32`, `uint64`, or `bool`. The
+unsupported GStreamer 1.28 scalar encodings
 (`int4`, `uint4`, and `bfloat16`) are rejected explicitly because
 this backend does not expose them without conversion ambiguity.
 
@@ -97,7 +99,9 @@ dims=1,1000
 dir=output
 ```
 
-Input dimensions choose HWC (`1,H,W,3`) or CHW (`1,3,H,W`) packing. `ranges`
+Input dimensions choose HWC (`1,H,W,3`) or CHW (`1,3,H,W`) packing. Further
+unit dimensions may follow the batch dimension, such as a frame count
+(`1,1,3,H,W`). `ranges`
 maps byte pixels into the model’s range per channel (one range applies to all
 channels; three ranges are always semantic R, G, B, including when
 `model-channel-order=bgr`). Source caps retain the input
@@ -105,6 +109,39 @@ video structure and add a `tensors` group keyed by `group-id`; each
 `tensor/strided` descriptor contains the declared dimensions, order, type, and
 tensor ID. Each declared output becomes a separate buffer in `GstTensorMeta`.
 
-The first release rejects dynamic dimensions, non-unit batch sizes, multiple
-inputs, non-image models, and runtime/model-info shape or scalar-type
-mismatches.
+Model-info dimensions are authoritative: they bind the model's symbolic
+(dynamic) dimensions, while fixed model dimensions must match. A model may
+have more outputs than model-info declares; undeclared outputs are neither
+computed nor attached.
+
+A model input other than the image is declared with `constant=<value>`; the
+element fills the whole tensor with that value on every run. Constant inputs
+take no `ranges` and may be `bool` (`true`, `false`, `1`, `0`), `float32`,
+`float64`, `int32`, `int64`, or `uint8`. For example, a video encoder taking
+one frame and an all-true frame mask:
+
+```ini
+[pixel_values]
+id=example-pixels
+type=float32
+dims=1,1,3,384,384
+dir=input
+ranges=-1.0,1.0
+
+[frame_mask]
+id=example-frame-mask
+type=bool
+dims=1,1
+dir=input
+constant=true
+
+[embedding]
+id=example-embedding
+type=float32
+dims=1,1,768
+dir=output
+```
+
+Every model input must be declared, and model-info must not declare tensors
+the model lacks. Non-unit batch sizes, more than one image input, non-image
+models, and runtime/model-info shape or scalar-type mismatches are rejected.

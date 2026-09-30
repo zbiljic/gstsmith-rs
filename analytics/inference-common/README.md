@@ -5,8 +5,10 @@ model-agnostic inference plugins. It owns the model-info 1.0 parser, image
 preprocessing, engine-neutral tensor values, tensor caps construction, and
 `GstTensorMeta` attachment.
 
-Its deterministic ONNX/model-info fixture is also the shared compatibility
-contract used by backend parity tests.
+Its deterministic ONNX/model-info fixtures are also the shared compatibility
+contract used by backend parity tests: `identity` covers the basic image
+contract, and `masked-frames` covers constant inputs, symbolic dimensions
+bound by model-info, and output subsets.
 
 Preprocessing decodes truthful RGB, BGR, RGBA, or BGRA source pixels into
 semantic red, green, and blue values, then packs them in the channel order

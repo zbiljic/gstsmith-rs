@@ -9,11 +9,20 @@ pub mod tract {
 
     use super::{Engine, InputTensor, OwnedTensor};
     use crate::tractinference::imp::ExecutionProvider;
-    use gst_inference_common::model_info::{ModelInfo, ScalarType, TensorDescription};
+    use gst_inference_common::model_info::{
+        ConstantInput, ConstantValue, ModelInfo, ScalarType, TensorDescription, dims_match,
+    };
+
+    /// What feeds one model input, in model input order.
+    enum Slot {
+        Image,
+        Constant(TValue),
+    }
 
     pub struct TractEngine {
         plan: std::sync::Arc<TypedRunnableModel>,
         input: TensorDescription,
+        slots: Vec<Slot>,
         outputs: Vec<TensorDescription>,
     }
 
@@ -23,56 +32,21 @@ pub mod tract {
             info: &ModelInfo,
             execution_provider: ExecutionProvider,
         ) -> Result<Self, String> {
-            let model = tract_onnx::onnx()
+            let mut model = tract_onnx::onnx()
                 .model_for_path(model_file)
                 .map_err(|error| format!("failed to load ONNX model: {error}"))?;
             let input = info.input().clone();
-            let runtime_inputs = model
-                .input_outlets()
-                .map_err(|error| format!("failed to inspect model inputs: {error}"))?;
-            if runtime_inputs.len() != 1 {
-                return Err(format!(
-                    "model has {} inputs; exactly one is supported",
-                    runtime_inputs.len()
-                ));
+            let (slots, facts) = input_slots(&model, info)?;
+            for (index, fact) in facts.into_iter().enumerate() {
+                model = model.with_input_fact(index, fact).map_err(|error| {
+                    format!("failed to specialize model input {index}: {error}")
+                })?;
             }
-            let runtime_input = runtime_inputs
-                .first()
-                .copied()
-                .ok_or_else(|| "model did not expose its input".to_owned())?;
-            validate_name(outlet_name(&model, runtime_input), &input.name, "input", 0)?;
-            let runtime_input_fact = model
-                .input_fact(0)
-                .map_err(|error| format!("failed to inspect model input: {error}"))?;
-            validate_fact(runtime_input_fact, &input, "input", 0)?;
-            let declared_outputs = model
-                .output_outlets()
-                .map_err(|error| format!("failed to inspect model outputs: {error}"))?;
-            if declared_outputs.len() != info.outputs().len() {
-                return Err(format!(
-                    "model has {} outputs but model-info declares {}",
-                    declared_outputs.len(),
-                    info.outputs().len()
-                ));
-            }
-            for (index, (outlet, descriptor)) in
-                declared_outputs.iter().zip(info.outputs()).enumerate()
-            {
-                validate_name(
-                    outlet_name(&model, *outlet),
-                    &descriptor.name,
-                    "output",
-                    index,
-                )?;
-            }
-            let fact: InferenceFact = match input.data_type {
-                ScalarType::Float32 => f32::fact(input.dims.clone()).into(),
-                ScalarType::Uint8 => u8::fact(input.dims.clone()).into(),
-                _ => return Err("model-info permits only float32 or uint8 inputs".to_owned()),
-            };
+            let selected = output_outlets(&model, info)?;
+            let model = model
+                .with_output_outlets(&selected)
+                .map_err(|error| format!("failed to select model outputs: {error}"))?;
             let mut model = model
-                .with_input_fact(0, fact)
-                .map_err(|error| format!("failed to specialize model input: {error}"))?
                 .into_typed()
                 .map_err(|error| format!("failed to convert model to a typed graph: {error}"))?;
             apply_execution_provider(&mut model, execution_provider)?;
@@ -102,9 +76,109 @@ pub mod tract {
             Ok(Self {
                 plan,
                 input,
+                slots,
                 outputs: info.outputs().to_vec(),
             })
         }
+    }
+
+    /// Map every model input to the image or a declared constant, validate it,
+    /// and derive the static fact model-info binds it to.
+    fn input_slots(
+        model: &InferenceModel,
+        info: &ModelInfo,
+    ) -> Result<(Vec<Slot>, Vec<InferenceFact>), String> {
+        let outlets = model
+            .input_outlets()
+            .map_err(|error| format!("failed to inspect model inputs: {error}"))?;
+        let mut slots = Vec::with_capacity(outlets.len());
+        let mut facts = Vec::with_capacity(outlets.len());
+        let mut names = Vec::with_capacity(outlets.len());
+        for (index, outlet) in outlets.iter().enumerate() {
+            let name = outlet_name(model, *outlet).unwrap_or_default();
+            let (description, slot) = if name == info.input().name {
+                (info.input(), Slot::Image)
+            } else if let Some(constant) = info
+                .constants()
+                .iter()
+                .find(|constant| constant.description.name == name)
+            {
+                (
+                    &constant.description,
+                    Slot::Constant(constant_tensor(constant)?),
+                )
+            } else {
+                return Err(format!(
+                    "model input {index} {name:?} is not declared in model-info"
+                ));
+            };
+            let runtime_fact = model
+                .input_fact(index)
+                .map_err(|error| format!("failed to inspect model input {index}: {error}"))?;
+            validate_fact(runtime_fact, description, "input", index)?;
+            facts.push(InferenceFact::dt_shape(
+                datum_type(description.data_type),
+                description.dims.clone(),
+            ));
+            slots.push(slot);
+            names.push(name.to_owned());
+        }
+        let declared = std::iter::once(info.input()).chain(
+            info.constants()
+                .iter()
+                .map(|constant| &constant.description),
+        );
+        for description in declared {
+            if !names.contains(&description.name) {
+                return Err(format!(
+                    "model-info input {:?} is not a model input",
+                    description.name
+                ));
+            }
+        }
+        Ok((slots, facts))
+    }
+
+    /// The model outputs model-info declares, in model-info order.
+    fn output_outlets(model: &InferenceModel, info: &ModelInfo) -> Result<Vec<OutletId>, String> {
+        let outlets = model
+            .output_outlets()
+            .map_err(|error| format!("failed to inspect model outputs: {error}"))?;
+        info.outputs()
+            .iter()
+            .map(|description| {
+                outlets
+                    .iter()
+                    .copied()
+                    .find(|outlet| outlet_name(model, *outlet) == Some(description.name.as_str()))
+                    .ok_or_else(|| {
+                        format!(
+                            "model-info output {:?} is not a model output",
+                            description.name
+                        )
+                    })
+            })
+            .collect()
+    }
+
+    /// A constant input filled with its declared value.
+    fn constant_tensor(constant: &ConstantInput) -> Result<TValue, String> {
+        let dims = &constant.description.dims;
+        let count = dims.iter().product::<usize>();
+        let tensor = match constant.value {
+            ConstantValue::Bool(value) => Tensor::from_shape(dims, &vec![value; count]),
+            ConstantValue::Float32(value) => Tensor::from_shape(dims, &vec![value; count]),
+            ConstantValue::Float64(value) => Tensor::from_shape(dims, &vec![value; count]),
+            ConstantValue::Int32(value) => Tensor::from_shape(dims, &vec![value; count]),
+            ConstantValue::Int64(value) => Tensor::from_shape(dims, &vec![value; count]),
+            ConstantValue::Uint8(value) => Tensor::from_shape(dims, &vec![value; count]),
+        };
+        tensor.map(TValue::from).map_err(|error| {
+            format!(
+                "failed to make constant input {:?}: {error}",
+                constant.description.name
+            )
+        })
     }
 
     fn apply_execution_provider(
@@ -148,9 +222,20 @@ pub mod tract {
                 }
                 _ => return Err("preprocessor produced the wrong input scalar type".to_owned()),
             };
+            let mut image = Some(TValue::from(tensor));
+            let inputs = self
+                .slots
+                .iter()
+                .map(|slot| match slot {
+                    Slot::Image => image
+                        .take()
+                        .ok_or_else(|| "model declares the image input twice".to_owned()),
+                    Slot::Constant(value) => Ok(value.clone()),
+                })
+                .collect::<Result<TVec<_>, String>>()?;
             let runtime_outputs = self
                 .plan
-                .run(tvec![tensor.into()])
+                .run(inputs)
                 .map_err(|error| format!("Tract execution failed: {error}"))?;
             if runtime_outputs.len() != self.outputs.len() {
                 return Err("Tract returned an unexpected number of outputs".to_owned());
@@ -167,21 +252,6 @@ pub mod tract {
                     })
                 })
                 .collect()
-        }
-    }
-
-    fn validate_name(
-        discovered: Option<&str>,
-        expected: &str,
-        direction: &str,
-        index: usize,
-    ) -> Result<(), String> {
-        if discovered == Some(expected) {
-            Ok(())
-        } else {
-            Err(format!(
-                "{direction} {index} name mismatch: model {discovered:?}, model-info {expected:?}"
-            ))
         }
     }
 
@@ -207,15 +277,23 @@ pub mod tract {
                 "{direction} {index} scalar type mismatch: model {actual_type:?}, model-info {expected:?}"
             ));
         }
+        if fact.shape.is_open() {
+            return Ok(());
+        }
+        // Symbolic model dimensions are bound by the model-info dimensions.
         let shape = fact
             .shape
-            .as_concrete_finite()
-            .map_err(|error| format!("failed to inspect {direction} {index} dimensions: {error}"))?
-            .ok_or_else(|| format!("{direction} {index} has dynamic dimensions"))?;
-        if shape.as_slice() != descriptor.dims.as_slice() {
+            .dims()
+            .map(|dim| {
+                dim.concretize()
+                    .and_then(|dim| dim.as_i64())
+                    .and_then(|dim| usize::try_from(dim).ok())
+            })
+            .collect::<Vec<_>>();
+        if !dims_match(&shape, &descriptor.dims) {
             return Err(format!(
-                "{direction} {index} dimensions mismatch: model {shape:?}, model-info {:?}",
-                descriptor.dims
+                "{direction} {index} dimensions mismatch: model {:?}, model-info {:?}",
+                fact.shape, descriptor.dims
             ));
         }
         Ok(())
@@ -261,6 +339,7 @@ pub mod tract {
             ScalarType::Uint16 => u16::datum_type(),
             ScalarType::Uint32 => u32::datum_type(),
             ScalarType::Uint64 => u64::datum_type(),
+            ScalarType::Bool => bool::datum_type(),
         }
     }
 
@@ -298,6 +377,10 @@ pub mod tract {
             ScalarType::Uint16 => Ok(scalar_bytes!(u16, "uint16")),
             ScalarType::Uint32 => Ok(scalar_bytes!(u32, "uint32")),
             ScalarType::Uint64 => Ok(scalar_bytes!(u64, "uint64")),
+            ScalarType::Bool => tensor
+                .to_plain_array_view::<bool>()
+                .map_err(|error| format!("failed to read bool output: {error}"))
+                .map(|values| values.iter().map(|value| u8::from(*value)).collect()),
         }
     }
 

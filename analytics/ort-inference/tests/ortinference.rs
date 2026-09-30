@@ -18,6 +18,10 @@ use gst::prelude::*;
 const MODEL_INFO: &str =
     include_str!("../../inference-common/tests/fixtures/identity.onnx.modelinfo");
 const MODEL: &[u8] = include_bytes!("../../inference-common/tests/fixtures/identity.onnx");
+const MASKED_MODEL_INFO: &str =
+    include_str!("../../inference-common/tests/fixtures/masked-frames.onnx.modelinfo");
+const MASKED_MODEL: &[u8] =
+    include_bytes!("../../inference-common/tests/fixtures/masked-frames.onnx");
 
 // Generated from a minimal ONNX textproto with the repository's Apache-2.0
 // licensed `onnx.proto3` and `protoc --encode=onnx.ModelProto`. A supported
@@ -577,4 +581,63 @@ fn benchmark_fixture_backends_reports_preprocessing_inference_and_total()
         drop(directory);
     }
     Ok(())
+}
+
+/// Run the masked-frames fixture (a dynamic `[batch, frames, 1, 2, 3]` image
+/// input, a bool mask input, and an undeclared second output) with the mask
+/// constant set to `mask`.
+fn run_masked_fixture(factory: &str, mask: &str) -> Vec<(String, Vec<usize>, Vec<f32>)> {
+    init();
+    let directory = tempfile::tempdir().expect("creating fixture directory");
+    let model = directory.path().join("masked-frames.onnx");
+    fs::write(&model, MASKED_MODEL).expect("writing fixture model");
+    fs::write(
+        directory.path().join("masked-frames.onnx.modelinfo"),
+        MASKED_MODEL_INFO.replace("constant=true", &format!("constant={mask}")),
+    )
+    .expect("writing fixture model-info");
+    let element = gst::ElementFactory::make(factory)
+        .property("model-file", model.to_string_lossy().as_ref())
+        .build()
+        .expect("creating fixture element");
+    let caps = caps();
+    let mut harness = gst_check::Harness::with_element(&element, Some("sink"), Some("src"));
+    harness.set_src_caps(caps.clone());
+    harness.play();
+    let output = harness
+        .push_and_pull(input_buffer(&caps))
+        .expect("running masked-frames fixture");
+    let meta = output
+        .meta::<gst_analytics::TensorMeta>()
+        .expect("tensor metadata attached");
+    meta.as_slice()
+        .iter()
+        .map(|tensor| {
+            (
+                tensor.id().as_str().to_string(),
+                tensor.dims().to_vec(),
+                tensor_values(tensor),
+            )
+        })
+        .collect()
+}
+
+#[test]
+fn constant_inputs_bind_dynamic_dims_and_only_declared_outputs_attach() {
+    for factory in ["ortinference", "tractinference"] {
+        assert_eq!(
+            run_masked_fixture(factory, "true"),
+            [(
+                "masked".to_owned(),
+                vec![1, 1, 1, 2, 3],
+                vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0]
+            )],
+            "{factory} with mask=true"
+        );
+        assert_eq!(
+            run_masked_fixture(factory, "false"),
+            [("masked".to_owned(), vec![1, 1, 1, 2, 3], vec![0.0; 6])],
+            "{factory} with mask=false"
+        );
+    }
 }

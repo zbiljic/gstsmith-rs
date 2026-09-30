@@ -1,9 +1,12 @@
 # ORT inference
 
 `gst-plugin-ort-inference` provides the `ortinference` GStreamer element. It
-uses ONNX Runtime and publishes every model output in model-info order through
-the shared `tensor/strided` caps and `GstTensorMeta` contract. Video buffers
-pass through unchanged.
+uses ONNX Runtime and publishes the model outputs model-info declares, in
+model-info order, through the shared `tensor/strided` caps and `GstTensorMeta`
+contract. Video buffers pass through unchanged. It reads the same model-info
+contract as `tractinference`, including constant inputs, output subsets, and
+dimensions that bind the model's dynamic dimensions; see the
+[Tract inference README](../tract-inference/README.md#model-info-contract).
 
 `model-channel-order=rgb` is the READY-mutable default. Set
 `model-channel-order=bgr` for a model that expects BGR channel order. The

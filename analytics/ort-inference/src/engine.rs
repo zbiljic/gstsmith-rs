@@ -2,11 +2,13 @@ use std::path::Path;
 use std::sync::Mutex;
 
 use gst_inference_common::engine::{Engine, InputTensor, OwnedTensor};
-use gst_inference_common::model_info::{ModelInfo, ScalarType, TensorDescription};
+use gst_inference_common::model_info::{
+    ConstantInput, ConstantValue, ModelInfo, ScalarType, TensorDescription, dims_match,
+};
 #[cfg(feature = "coreml")]
 use ort::ep::ExecutionProvider;
-use ort::session::Session;
 use ort::session::builder::GraphOptimizationLevel;
+use ort::session::{HasSelectedOutputs, OutputSelector, RunOptions, Session, SessionInputValue};
 use ort::value::{Tensor, TensorElementType, ValueType};
 
 /// The provider selected for an ORT session.
@@ -53,7 +55,10 @@ impl EngineOptions {
 pub struct OrtEngine {
     session: Mutex<Session>,
     input: TensorDescription,
+    constants: Vec<ConstantInput>,
     outputs: Vec<TensorDescription>,
+    /// Computes only the outputs model-info declares.
+    run_options: RunOptions<HasSelectedOutputs>,
 }
 
 impl OrtEngine {
@@ -108,10 +113,21 @@ impl OrtEngine {
             .commit_from_file(model_file)
             .map_err(|error| format!("failed to load ONNX model: {error}"))?;
         validate_session(&session, info)?;
+        let selector = info
+            .outputs()
+            .iter()
+            .fold(OutputSelector::no_default(), |selector, output| {
+                selector.with(output.name.as_str())
+            });
+        let run_options = RunOptions::new()
+            .map_err(|error| format!("failed to create ONNX Runtime run options: {error}"))?
+            .with_outputs(selector);
         Ok(Self {
             session: Mutex::new(session),
             input: info.input().clone(),
+            constants: info.constants().to_vec(),
             outputs: info.outputs().to_vec(),
+            run_options,
         })
     }
 }
@@ -130,6 +146,15 @@ impl Engine for OrtEngine {
             _ => return Err("preprocessor produced the wrong input scalar type".to_owned()),
         }
         .map_err(|error| format!("failed to construct ORT input tensor: {error}"))?;
+        let mut inputs: Vec<(std::borrow::Cow<'_, str>, SessionInputValue<'_>)> =
+            Vec::with_capacity(1 + self.constants.len());
+        inputs.push((self.input.name.as_str().into(), input_value.into()));
+        for constant in &self.constants {
+            inputs.push((
+                constant.description.name.as_str().into(),
+                constant_tensor(constant)?.into(),
+            ));
+        }
         // ORT's borrowed TensorRef cannot outlive the input buffer while the
         // session runs. Tensor::from_array consumes the input Vec into an
         // owned Value (rather than copying it), while output bytes are copied
@@ -139,17 +164,16 @@ impl Engine for OrtEngine {
             .lock()
             .map_err(|_error| "ONNX Runtime session lock is poisoned".to_owned())?;
         let values = session
-            .run(ort::inputs![input_value])
+            .run_with_options(inputs, &self.run_options)
             .map_err(|error| format!("ONNX Runtime inference failed: {error}"))?;
-        if values.len() != self.outputs.len() {
-            return Err("ONNX Runtime returned an unexpected number of outputs".to_owned());
-        }
-        values
+        self.outputs
             .iter()
-            .zip(&self.outputs)
             .enumerate()
-            .map(|(index, ((_, value), description))| {
-                let bytes = tensor_bytes(&value, description.data_type)
+            .map(|(index, description)| {
+                let value = values.get(description.name.as_str()).ok_or_else(|| {
+                    format!("ONNX Runtime did not return output {:?}", description.name)
+                })?;
+                let bytes = tensor_bytes(value, description.data_type)
                     .map_err(|error| format!("failed to serialize output {index}: {error}"))?;
                 Ok(OwnedTensor {
                     description: description.clone(),
@@ -160,46 +184,86 @@ impl Engine for OrtEngine {
     }
 }
 
+/// A constant input filled with its declared value.
+fn constant_tensor(constant: &ConstantInput) -> Result<ort::value::DynValue, String> {
+    let dims = constant.description.dims.clone();
+    let count = dims.iter().product::<usize>();
+    let value = match constant.value {
+        ConstantValue::Bool(value) => {
+            Tensor::from_array((dims, vec![value; count])).map(ort::value::Value::into_dyn)
+        }
+        ConstantValue::Float32(value) => {
+            Tensor::from_array((dims, vec![value; count])).map(ort::value::Value::into_dyn)
+        }
+        ConstantValue::Float64(value) => {
+            Tensor::from_array((dims, vec![value; count])).map(ort::value::Value::into_dyn)
+        }
+        ConstantValue::Int32(value) => {
+            Tensor::from_array((dims, vec![value; count])).map(ort::value::Value::into_dyn)
+        }
+        ConstantValue::Int64(value) => {
+            Tensor::from_array((dims, vec![value; count])).map(ort::value::Value::into_dyn)
+        }
+        ConstantValue::Uint8(value) => {
+            Tensor::from_array((dims, vec![value; count])).map(ort::value::Value::into_dyn)
+        }
+    };
+    value.map_err(|error| {
+        format!(
+            "failed to construct constant input {:?}: {error}",
+            constant.description.name
+        )
+    })
+}
+
+/// Every model input must be declared (the image or a constant) and every
+/// declared tensor must exist; outputs may be a declared subset.
 fn validate_session(session: &Session, info: &ModelInfo) -> Result<(), String> {
-    if session.inputs().len() != 1 {
-        return Err(format!(
-            "model has {} inputs; exactly one is supported",
-            session.inputs().len()
-        ));
+    let declared_inputs = std::iter::once(info.input())
+        .chain(
+            info.constants()
+                .iter()
+                .map(|constant| &constant.description),
+        )
+        .collect::<Vec<_>>();
+    for (index, input) in session.inputs().iter().enumerate() {
+        let description = declared_inputs
+            .iter()
+            .find(|description| description.name == input.name())
+            .ok_or_else(|| {
+                format!(
+                    "model input {index} {:?} is not declared in model-info",
+                    input.name()
+                )
+            })?;
+        validate_type(input.dtype(), description, "input", index)?;
     }
-    let input = session
-        .inputs()
-        .first()
-        .ok_or_else(|| "model did not expose its input".to_owned())?;
-    validate_name(input.name(), &info.input().name, "input", 0)?;
-    validate_type(input.dtype(), info.input(), "input", 0)?;
-    if session.outputs().len() != info.outputs().len() {
-        return Err(format!(
-            "model has {} outputs but model-info declares {}",
-            session.outputs().len(),
-            info.outputs().len()
-        ));
+    for description in &declared_inputs {
+        if !session
+            .inputs()
+            .iter()
+            .any(|input| input.name() == description.name)
+        {
+            return Err(format!(
+                "model-info input {:?} is not a model input",
+                description.name
+            ));
+        }
     }
-    for (index, (output, description)) in session.outputs().iter().zip(info.outputs()).enumerate() {
-        validate_name(output.name(), &description.name, "output", index)?;
+    for (index, description) in info.outputs().iter().enumerate() {
+        let output = session
+            .outputs()
+            .iter()
+            .find(|output| output.name() == description.name)
+            .ok_or_else(|| {
+                format!(
+                    "model-info output {:?} is not a model output",
+                    description.name
+                )
+            })?;
         validate_type(output.dtype(), description, "output", index)?;
     }
     Ok(())
-}
-
-fn validate_name(
-    discovered: &str,
-    expected: &str,
-    direction: &str,
-    index: usize,
-) -> Result<(), String> {
-    if discovered == expected {
-        Ok(())
-    } else {
-        Err(format!(
-            "{direction} {index} name mismatch: model {discovered:?}, model-info {expected:?}"
-        ))
-    }
 }
 
 fn validate_type(
@@ -217,12 +281,12 @@ fn validate_type(
             "{direction} {index} scalar type mismatch: model {ty:?}, model-info {expected_type:?}"
         ));
     }
+    // ONNX Runtime reports dynamic dimensions as -1.
     let actual = shape
         .iter()
-        .copied()
-        .map(|dim| usize::try_from(dim).ok())
-        .collect::<Option<Vec<_>>>();
-    if actual.as_deref() != Some(description.dims.as_slice()) {
+        .map(|dim| usize::try_from(*dim).ok())
+        .collect::<Vec<_>>();
+    if !dims_match(&actual, &description.dims) {
         return Err(format!(
             "{direction} {index} dimensions mismatch: model {shape:?}, model-info {:?}",
             description.dims
@@ -244,13 +308,11 @@ fn tensor_element_type(data_type: ScalarType) -> TensorElementType {
         ScalarType::Uint16 => TensorElementType::Uint16,
         ScalarType::Uint32 => TensorElementType::Uint32,
         ScalarType::Uint64 => TensorElementType::Uint64,
+        ScalarType::Bool => TensorElementType::Bool,
     }
 }
 
-fn tensor_bytes(
-    value: &ort::value::ValueRef<'_, ort::value::DynValueTypeMarker>,
-    data_type: ScalarType,
-) -> Result<Vec<u8>, String> {
+fn tensor_bytes(value: &ort::value::DynValue, data_type: ScalarType) -> Result<Vec<u8>, String> {
     macro_rules! scalar_bytes {
         ($type:ty, $label:literal) => {
             value
@@ -287,5 +349,9 @@ fn tensor_bytes(
         ScalarType::Uint16 => scalar_bytes!(u16, "uint16"),
         ScalarType::Uint32 => scalar_bytes!(u32, "uint32"),
         ScalarType::Uint64 => scalar_bytes!(u64, "uint64"),
+        ScalarType::Bool => value
+            .try_extract_tensor::<bool>()
+            .map_err(|error| format!("failed to read bool output: {error}"))
+            .map(|(_, values)| values.iter().map(|value| u8::from(*value)).collect()),
     }
 }
