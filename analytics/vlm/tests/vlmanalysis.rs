@@ -326,6 +326,7 @@ fn worker_protocol_one_frame_posts_exact_auth_usage_and_result() {
     assert_eq!(structure.name(), "vlmanalysis-result");
     assert_eq!(structure.get::<u64>("prompt-tokens"), Ok(7));
     assert_eq!(structure.get::<u64>("completion-tokens"), Ok(3));
+    assert!(!structure.has_field("reasoning-tokens"));
 }
 
 #[test]
@@ -894,6 +895,147 @@ fn structured_output_posts_original_json_and_recovers_after_invalid_content() {
 }
 
 #[test]
+fn reasoning_controls_compose_with_json_and_report_optional_usage() {
+    let replies = [None, Some(0), Some(42)].map(|tokens| Reply::json(&serde_json::json!({
+        "choices":[{"message":{"content":"{\"scene\":\"street\"}"},"finish_reason":"stop"}],
+        "usage":{"prompt_tokens":7,"completion_tokens":50,"completion_tokens_details":{"reasoning_tokens":tokens}}
+    }).to_string()));
+    let server = make_server(replies.to_vec());
+    let element = make_element(&server.endpoint);
+    element.set_property_from_str("token-limit-mode", "completion");
+    element.set_property_from_str("sampling-mode", "provider-default");
+    element.set_property("reasoning-effort", "low");
+    element.set_property("max-tokens", 4096_u32);
+    element.set_property_from_str("response-format", "json-object");
+    element.set_property("user-prompt", "Return JSON.");
+    let bus = gst::Bus::new();
+    element.set_bus(Some(&bus));
+    let mut harness = make_harness(&element);
+    for (id, tokens) in (1_u64..).zip([None, Some(0_u64), Some(42)]) {
+        assert_eq!(
+            harness.push(jpeg(b"frame", Some(gst::ClockTime::from_seconds(id)))),
+            Ok(gst::FlowSuccess::Ok)
+        );
+        let request = server
+            .requests
+            .recv_timeout(Duration::from_secs(2))
+            .expect("reasoning request");
+        let wire: serde_json::Value =
+            serde_json::from_slice(&request.body).expect("reasoning wire");
+        assert_eq!(
+            wire,
+            serde_json::json!({
+                "model":"test-model",
+                "messages":[{"role":"user","content":[{"type":"text","text":"Return JSON."},{"type":"image_url","image_url":{"url":"data:image/jpeg;base64,ZnJhbWU="}}]}],
+                "max_completion_tokens":4096,"stream":false,"reasoning_effort":"low","response_format":{"type":"json_object"}
+            })
+        );
+        wait_for_outcomes(&element, id);
+        let result = wait_for_structure(&bus, "vlmanalysis-result").expect("reasoning result");
+        assert_eq!(result.get::<u64>("request-id"), Ok(id));
+        assert_eq!(
+            result.get::<String>("text").as_deref(),
+            Ok("{\"scene\":\"street\"}")
+        );
+        assert_eq!(result.get::<u64>("prompt-tokens"), Ok(7));
+        assert_eq!(result.get::<u64>("completion-tokens"), Ok(50));
+        assert_eq!(result.get::<u64>("reasoning-tokens").ok(), tokens);
+        assert_eq!(result.has_field("reasoning-tokens"), tokens.is_some());
+    }
+    assert_eq!(element.property::<u64>("completed-requests"), 3);
+    assert_eq!(element.property::<u64>("failed-requests"), 0);
+}
+
+#[test]
+fn reasoning_properties_round_trip_and_validate_effort_boundaries() {
+    let server = make_server(vec![ok_reply()]);
+    let element = make_element(&server.endpoint);
+    assert_eq!(element.property::<Option<String>>("reasoning-effort"), None);
+    assert_eq!(element.property::<u32>("max-tokens"), 512);
+    for (property, nicks) in [
+        ("token-limit-mode", ["legacy", "completion"]),
+        ("sampling-mode", ["configured", "provider-default"]),
+    ] {
+        let value = element.property_value(property);
+        assert_eq!(
+            gst::glib::EnumValue::from_value(&value)
+                .expect("default mode")
+                .1
+                .nick(),
+            nicks[0]
+        );
+        for (number, nick) in nicks.into_iter().enumerate() {
+            element.set_property_from_str(property, nick);
+            let value = element.property_value(property);
+            let (_class, value) = gst::glib::EnumValue::from_value(&value).expect("mode enum");
+            assert_eq!(value.nick(), nick);
+            assert_eq!(
+                usize::try_from(value.value()).expect("nonnegative mode"),
+                number
+            );
+        }
+    }
+    assert_eq!(
+        element.property::<f64>("temperature").to_bits(),
+        0.2_f64.to_bits()
+    );
+    assert_eq!(
+        element.property::<f64>("top-p").to_bits(),
+        0.9_f64.to_bits()
+    );
+    let boundary = "a".repeat(64);
+    for effort in [
+        "none",
+        "low",
+        "medium",
+        "high",
+        "custom_2-level",
+        boundary.as_str(),
+    ] {
+        element.set_property("reasoning-effort", effort);
+        assert_eq!(element.property::<String>("reasoning-effort"), effort);
+        element
+            .set_state(gst::State::Paused)
+            .expect("valid effort accepted");
+        let _state = element.set_state(gst::State::Null);
+    }
+    element.set_property("reasoning-effort", None::<String>);
+    assert_eq!(element.property::<Option<String>>("reasoning-effort"), None);
+    let oversized = "a".repeat(65);
+    for effort in [
+        "",
+        "LOW",
+        "low high",
+        "low\n",
+        "é",
+        "low.private",
+        oversized.as_str(),
+    ] {
+        element.set_property("reasoning-effort", effort);
+        let bus = gst::Bus::new();
+        element.set_bus(Some(&bus));
+        assert_eq!(
+            element.set_state(gst::State::Paused),
+            Err(gst::StateChangeError)
+        );
+        let message = bus
+            .timed_pop_filtered(gst::ClockTime::SECOND, &[gst::MessageType::Error])
+            .expect("effort settings error");
+        let rendered = match message.view() {
+            gst::MessageView::Error(error) => format!("{} {:?}", error.error(), error.debug()),
+            _ => String::new(),
+        };
+        assert!(rendered.contains("reasoning-effort must contain 1 through 64"));
+        assert!(!rendered.contains("low.private"));
+        let _state = element.set_state(gst::State::Null);
+    }
+    assert!(matches!(
+        server.requests.recv_timeout(Duration::from_millis(50)),
+        Err(mpsc::RecvTimeoutError::Timeout)
+    ));
+}
+
+#[test]
 fn structured_output_properties_round_trip_and_accept_schema_limit() {
     let server = make_server(vec![ok_reply()]);
     let element = make_element(&server.endpoint);
@@ -1205,6 +1347,9 @@ fn property_mutability_and_counter_lifecycle_reset() {
         "temperature",
         "top-p",
         "response-format",
+        "token-limit-mode",
+        "sampling-mode",
+        "reasoning-effort",
         "response-schema",
         "request-timeout",
         "queue-capacity",

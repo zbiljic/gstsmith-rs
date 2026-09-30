@@ -10,7 +10,9 @@ use gst::prelude::*;
 use gst::subclass::prelude::*;
 use gst_base::subclass::prelude::*;
 
-use crate::backend::{self, BackendError, GenerationRequest, ResponseFormat};
+use crate::backend::{
+    self, BackendError, GenerationRequest, ResponseFormat, SamplingMode, TokenLimitMode,
+};
 use crate::{prompt, runtime};
 
 const DEFAULT_ENDPOINT: &str = "http://127.0.0.1:8000/v1/chat/completions";
@@ -46,6 +48,9 @@ struct Settings {
     max_tokens: u32,
     temperature: f64,
     top_p: f64,
+    token_limit_mode: TokenLimitMode,
+    sampling_mode: SamplingMode,
+    reasoning_effort: Option<Arc<str>>,
     response_format: ResponseFormat,
     response_schema: Option<Arc<str>>,
     request_timeout: u64,
@@ -69,6 +74,9 @@ impl Default for Settings {
             max_tokens: DEFAULT_MAX_TOKENS,
             temperature: DEFAULT_TEMPERATURE,
             top_p: DEFAULT_TOP_P,
+            token_limit_mode: TokenLimitMode::Legacy,
+            sampling_mode: SamplingMode::Configured,
+            reasoning_effort: None,
             response_format: ResponseFormat::Default,
             response_schema: None,
             request_timeout: DEFAULT_REQUEST_TIMEOUT,
@@ -127,6 +135,9 @@ struct WorkerConfig {
     max_tokens: u32,
     temperature: f64,
     top_p: f64,
+    token_limit_mode: TokenLimitMode,
+    sampling_mode: SamplingMode,
+    reasoning_effort: Option<Arc<str>>,
     response_format: ResponseFormat,
     response_schema: Option<Arc<serde_json::Value>>,
     request_timeout: Duration,
@@ -452,6 +463,23 @@ impl ObjectImpl for VlmAnalysis {
                     .default_value(DEFAULT_REQUEST_TIMEOUT)
                     .mutable_ready()
                     .build(),
+                glib::ParamSpecEnum::builder::<TokenLimitMode>("token-limit-mode")
+                    .nick("Token Limit Mode")
+                    .blurb("Whether max-tokens sends legacy max_tokens or max_completion_tokens including reasoning")
+                    .default_value(TokenLimitMode::Legacy)
+                    .mutable_ready()
+                    .build(),
+                glib::ParamSpecEnum::builder::<SamplingMode>("sampling-mode")
+                    .nick("Sampling Mode")
+                    .blurb("Send configured temperature/top-p or omit both for provider defaults")
+                    .default_value(SamplingMode::Configured)
+                    .mutable_ready()
+                    .build(),
+                glib::ParamSpecString::builder("reasoning-effort")
+                    .nick("Reasoning Effort")
+                    .blurb("Optional provider/model effort name; unset omits the field, none is explicit")
+                    .mutable_ready()
+                    .build(),
                 glib::ParamSpecEnum::builder::<ResponseFormat>("response-format")
                     .nick("Response Format")
                     .blurb("Requested output format; default omits the API field")
@@ -524,6 +552,13 @@ impl ObjectImpl for VlmAnalysis {
             "max-tokens" => set_copy(value, &mut settings.max_tokens),
             "temperature" => set_copy(value, &mut settings.temperature),
             "top-p" => set_copy(value, &mut settings.top_p),
+            "token-limit-mode" => set_copy(value, &mut settings.token_limit_mode),
+            "sampling-mode" => set_copy(value, &mut settings.sampling_mode),
+            "reasoning-effort" => {
+                if let Ok(effort) = value.get::<Option<String>>() {
+                    settings.reasoning_effort = effort.map(Arc::from);
+                }
+            }
             "response-format" => set_copy(value, &mut settings.response_format),
             "response-schema" => {
                 if let Ok(schema) = value.get::<Option<String>>() {
@@ -557,6 +592,9 @@ impl ObjectImpl for VlmAnalysis {
             "max-tokens" => settings.max_tokens.to_value(),
             "temperature" => settings.temperature.to_value(),
             "top-p" => settings.top_p.to_value(),
+            "token-limit-mode" => settings.token_limit_mode.to_value(),
+            "sampling-mode" => settings.sampling_mode.to_value(),
+            "reasoning-effort" => settings.reasoning_effort.as_deref().to_value(),
             "response-format" => settings.response_format.to_value(),
             "response-schema" => settings.response_schema.as_deref().to_value(),
             "request-timeout" => settings.request_timeout.to_value(),
@@ -774,6 +812,17 @@ fn validate_settings(settings: &Settings) -> Result<WorkerConfig, &'static str> 
     if !settings.top_p.is_finite() || settings.top_p <= 0.0 || settings.top_p > 1.0 {
         return Err("top-p must be finite, greater than 0.0, and at most 1.0");
     }
+    if settings.reasoning_effort.as_deref().is_some_and(|effort| {
+        effort.is_empty()
+            || effort.len() > 64
+            || !effort.bytes().all(|byte| {
+                byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'-' | b'_')
+            })
+    }) {
+        return Err(
+            "reasoning-effort must contain 1 through 64 lowercase ASCII letters, digits, hyphens, or underscores",
+        );
+    }
     if settings.request_timeout == 0 {
         return Err("request-timeout must be nonzero");
     }
@@ -812,6 +861,9 @@ fn validate_settings(settings: &Settings) -> Result<WorkerConfig, &'static str> 
         max_tokens: settings.max_tokens,
         temperature: settings.temperature,
         top_p: settings.top_p,
+        token_limit_mode: settings.token_limit_mode,
+        sampling_mode: settings.sampling_mode,
+        reasoning_effort: settings.reasoning_effort.clone(),
         response_format: settings.response_format,
         response_schema: validate_response_schema(settings)?.map(Arc::new),
         request_timeout: Duration::from_nanos(settings.request_timeout),
@@ -899,6 +951,9 @@ async fn worker_loop(
             max_tokens: config.max_tokens,
             temperature: config.temperature,
             top_p: config.top_p,
+            token_limit_mode: config.token_limit_mode,
+            sampling_mode: config.sampling_mode,
+            reasoning_effort: config.reasoning_effort.clone(),
             response_format: config.response_format,
             response_schema: config.response_schema.clone(),
         };
@@ -928,8 +983,9 @@ async fn worker_loop(
                     start_pts,
                     end_pts,
                     latency,
-                    result.usage.prompt_tokens,
-                    result.usage.completion_tokens,
+                    result.usage.prompt,
+                    result.usage.completion,
+                    result.usage.reasoning,
                 );
             }
             Err(error) => {
@@ -990,6 +1046,7 @@ fn post_result_message(
     latency: u64,
     prompt_tokens: Option<u64>,
     completion_tokens: Option<u64>,
+    reasoning_tokens: Option<u64>,
 ) {
     let mut structure = gst::Structure::builder("vlmanalysis-result")
         .field("request-id", id)
@@ -1010,6 +1067,9 @@ fn post_result_message(
     }
     if let Some(tokens) = completion_tokens {
         structure.set("completion-tokens", tokens);
+    }
+    if let Some(tokens) = reasoning_tokens {
+        structure.set("reasoning-tokens", tokens);
     }
     let message = gst::message::Element::builder(structure)
         .src(element)

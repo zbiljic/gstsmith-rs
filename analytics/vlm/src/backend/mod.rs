@@ -23,6 +23,28 @@ pub(crate) enum ResponseFormat {
     JsonSchema = 3,
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, glib::Enum, PartialEq)]
+#[repr(i32)]
+#[enum_type(name = "GstSmithVlmTokenLimitMode")]
+pub(crate) enum TokenLimitMode {
+    #[default]
+    #[enum_value(name = "Legacy", nick = "legacy")]
+    Legacy = 0,
+    #[enum_value(name = "Completion", nick = "completion")]
+    Completion = 1,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, glib::Enum, PartialEq)]
+#[repr(i32)]
+#[enum_type(name = "GstSmithVlmSamplingMode")]
+pub(crate) enum SamplingMode {
+    #[default]
+    #[enum_value(name = "Configured", nick = "configured")]
+    Configured = 0,
+    #[enum_value(name = "Provider default", nick = "provider-default")]
+    ProviderDefault = 1,
+}
+
 pub(crate) struct GenerationRequest {
     pub(crate) model: String,
     pub(crate) messages: Vec<Message>,
@@ -31,11 +53,15 @@ pub(crate) struct GenerationRequest {
     pub(crate) top_p: f64,
     pub(crate) response_format: ResponseFormat,
     pub(crate) response_schema: Option<Arc<serde_json::Value>>,
+    pub(crate) token_limit_mode: TokenLimitMode,
+    pub(crate) sampling_mode: SamplingMode,
+    pub(crate) reasoning_effort: Option<Arc<str>>,
 }
 
 pub(crate) struct Usage {
-    pub(crate) prompt_tokens: Option<u64>,
-    pub(crate) completion_tokens: Option<u64>,
+    pub(crate) prompt: Option<u64>,
+    pub(crate) completion: Option<u64>,
+    pub(crate) reasoning: Option<u64>,
 }
 
 pub(crate) struct GenerationResult {

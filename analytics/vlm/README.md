@@ -78,6 +78,44 @@ gst-launch-1.0 -m \
   ! fakesink
 ```
 
+## Reasoning and generation controls
+
+The READY-mutable `reasoning-effort` string is unset by default, which omits
+the API field. An explicit `none` is sent literally. Names such as `low`,
+`medium`, and `high` require provider/model support; custom names are accepted
+if they contain 1 through 64 lowercase ASCII letters, digits, hyphens, or
+underscores. The element does not infer support from model names or retry with
+different settings.
+
+`token-limit-mode=legacy` (default) sends `max_tokens`; `completion` sends
+`max_completion_tokens` instead. Both use the `max-tokens` property, whose
+default remains 512. Completion mode budgets reasoning and visible output
+together, so reasoning models may need a larger limit to produce useful text.
+A larger budget can consume more tokens and cost more; `request-timeout` still
+bounds the request.
+
+`sampling-mode=configured` (default) sends `temperature` and `top-p` unchanged.
+`provider-default` omits both fields without changing their property values.
+Use it explicitly for model configurations that reject sampling parameters;
+it does not itself make output deterministic or disable reasoning.
+
+For a compatible reasoning vision model at the default local endpoint:
+
+```sh
+gst-launch-1.0 -m \
+  videotestsrc \
+  ! videoconvert \
+  ! jpegenc \
+  ! vlmanalysis \
+      model=your-compatible-vision-model \
+      token-limit-mode=completion \
+      sampling-mode=provider-default \
+      reasoning-effort=low \
+      max-tokens=4096 \
+      user-prompt="Describe the scene." \
+  ! fakesink
+```
+
 ## Sampling and lifecycle
 
 `analysis-interval` defaults to five seconds and uses buffer PTS; zero selects
@@ -104,6 +142,8 @@ blocking the stream. `drain-timeout` bounds shutdown; zero aborts immediately.
   `frame-count` (`u32`), and `latency` (`u64` nanoseconds).
 - `start-pts` and `end-pts` (`GstClockTime`) when the batch contains valid PTS.
 - `prompt-tokens` and `completion-tokens` (`u64`) when reported by the provider.
+- `reasoning-tokens` (`u64`) when reported in completion token details, including
+  zero. Separate provider reasoning fields and summaries are not forwarded.
 
 `vlmanalysis-error` contains `generation`, `kind`, a sanitized `message`, and
 `frame-count`. It also contains `request-id` after batching and `http-status`

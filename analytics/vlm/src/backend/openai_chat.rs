@@ -4,7 +4,10 @@ use futures_util::StreamExt;
 use reqwest::{Client, StatusCode, Url};
 use serde::{Deserialize, Serialize};
 
-use super::{BackendError, GenerationRequest, GenerationResult, ResponseFormat, Usage};
+use super::{
+    BackendError, GenerationRequest, GenerationResult, ResponseFormat, SamplingMode,
+    TokenLimitMode, Usage,
+};
 use crate::prompt::{Message, Part, Role};
 
 const MAX_RESPONSE_BYTES: usize = 1024 * 1024;
@@ -13,9 +16,16 @@ const MAX_RESPONSE_BYTES: usize = 1024 * 1024;
 struct WireRequest<'a> {
     model: &'a str,
     messages: Vec<WireMessage<'a>>,
-    max_tokens: u32,
-    temperature: f64,
-    top_p: f64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    max_tokens: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    max_completion_tokens: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    temperature: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    top_p: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reasoning_effort: Option<&'a str>,
     stream: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     response_format: Option<WireResponseFormat<'a>>,
@@ -85,6 +95,12 @@ struct ResponseMessage {
 struct WireUsage {
     prompt_tokens: Option<u64>,
     completion_tokens: Option<u64>,
+    completion_tokens_details: Option<CompletionTokensDetails>,
+}
+
+#[derive(Deserialize)]
+struct CompletionTokensDetails {
+    reasoning_tokens: Option<u64>,
 }
 
 fn role_name(role: Role) -> &'static str {
@@ -147,9 +163,14 @@ fn serialize(request: &GenerationRequest) -> Result<Vec<u8>, BackendError> {
     serde_json::to_vec(&WireRequest {
         model: &request.model,
         messages,
-        max_tokens: request.max_tokens,
-        temperature: request.temperature,
-        top_p: request.top_p,
+        max_tokens: (request.token_limit_mode == TokenLimitMode::Legacy)
+            .then_some(request.max_tokens),
+        max_completion_tokens: (request.token_limit_mode == TokenLimitMode::Completion)
+            .then_some(request.max_tokens),
+        temperature: (request.sampling_mode == SamplingMode::Configured)
+            .then_some(request.temperature),
+        top_p: (request.sampling_mode == SamplingMode::Configured).then_some(request.top_p),
+        reasoning_effort: request.reasoning_effort.as_deref(),
         stream: false,
         response_format,
     })
@@ -208,12 +229,16 @@ fn parse(body: &[u8], format: ResponseFormat) -> Result<GenerationResult, Backen
     }
     let usage = response.usage.map_or(
         Usage {
-            prompt_tokens: None,
-            completion_tokens: None,
+            prompt: None,
+            completion: None,
+            reasoning: None,
         },
         |usage| Usage {
-            prompt_tokens: usage.prompt_tokens,
-            completion_tokens: usage.completion_tokens,
+            prompt: usage.prompt_tokens,
+            completion: usage.completion_tokens,
+            reasoning: usage
+                .completion_tokens_details
+                .and_then(|details| details.reasoning_tokens),
         },
     );
     Ok(GenerationResult { text, usage })
@@ -335,6 +360,9 @@ mod tests {
             top_p: 0.9,
             response_format: ResponseFormat::Default,
             response_schema: None,
+            token_limit_mode: TokenLimitMode::Legacy,
+            sampling_mode: SamplingMode::Configured,
+            reasoning_effort: None,
         }
     }
 
@@ -363,6 +391,62 @@ mod tests {
         assert_eq!(value["stream"], false);
         assert_eq!(value.as_object().map(serde_json::Map::len), Some(6));
         assert!(value.get("response_format").is_none());
+    }
+
+    #[test]
+    fn openai_chat_serializes_explicit_reasoning_controls() {
+        for token_mode in [TokenLimitMode::Legacy, TokenLimitMode::Completion] {
+            for sampling_mode in [SamplingMode::Configured, SamplingMode::ProviderDefault] {
+                for effort in [None, Some("none"), Some("low"), Some("custom_2-level")] {
+                    let mut request = generation(Vec::new());
+                    request.token_limit_mode = token_mode;
+                    request.sampling_mode = sampling_mode;
+                    request.reasoning_effort = effort.map(Arc::from);
+                    let mut expected =
+                        serde_json::json!({"model":"model", "messages":[], "stream":false});
+                    let limit = if token_mode == TokenLimitMode::Legacy {
+                        "max_tokens"
+                    } else {
+                        "max_completion_tokens"
+                    };
+                    expected[limit] = 512.into();
+                    if sampling_mode == SamplingMode::Configured {
+                        expected["temperature"] = 0.2.into();
+                        expected["top_p"] = 0.9.into();
+                    }
+                    if let Some(effort) = effort {
+                        expected["reasoning_effort"] = effort.into();
+                    }
+                    let wire: serde_json::Value = serde_json::from_slice(
+                        &serialize(&request).expect("serializing reasoning controls"),
+                    )
+                    .expect("parsing wire request");
+                    assert_eq!(wire, expected);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn openai_chat_parses_optional_reasoning_usage() {
+        for (details, expected) in [
+            (None, None),
+            (Some(serde_json::Value::Null), None),
+            (Some(serde_json::json!({})), None),
+            (Some(serde_json::json!({"reasoning_tokens":null})), None),
+            (Some(serde_json::json!({"reasoning_tokens":0})), Some(0)),
+            (Some(serde_json::json!({"reasoning_tokens":42})), Some(42)),
+        ] {
+            let mut body = serde_json::json!({"choices":[{"message":{"content":"ok"}}], "usage":{"prompt_tokens":7,"completion_tokens":50}});
+            if let Some(details) = details {
+                body["usage"]["completion_tokens_details"] = details;
+            }
+            let result = parse(body.to_string().as_bytes(), ResponseFormat::Default)
+                .expect("optional reasoning usage");
+            assert_eq!(result.usage.prompt, Some(7));
+            assert_eq!(result.usage.completion, Some(50));
+            assert_eq!(result.usage.reasoning, expected);
+        }
     }
 
     #[test]
@@ -454,13 +538,13 @@ mod tests {
     #[test]
     fn openai_chat_parses_usage_presence_and_absence() {
         let with = parse(br#"{"choices":[{"message":{"content":"ok"}}],"usage":{"prompt_tokens":2,"completion_tokens":3}}"#, ResponseFormat::Default).expect("parsing response with usage");
-        assert_eq!(with.usage.prompt_tokens, Some(2));
+        assert_eq!(with.usage.prompt, Some(2));
         let without = parse(
             br#"{"choices":[{"message":{"content":"ok"}}]}"#,
             ResponseFormat::Default,
         )
         .expect("parsing response without usage");
-        assert_eq!(without.usage.completion_tokens, None);
+        assert_eq!(without.usage.completion, None);
     }
 
     #[test]
