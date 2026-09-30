@@ -42,6 +42,42 @@ certificate validation. Plaintext HTTP is accepted for loopback addresses;
 non-loopback HTTP requires `allow-insecure-http=true`, which exposes JPEG data
 and credentials in transit.
 
+## Structured output
+
+`response-format` is `default` (omit the API field), `text`, `json-object`, or
+`json-schema`. These settings are mutable in READY. JSON modes require a
+provider/model that supports the selected format; unsupported settings produce
+normal HTTP errors, with no automatic fallback. Explicitly ask for JSON in the
+prompt when using `json-object`; prompts are sent literally, without rewriting.
+
+`json-schema` requires `response-schema`, a JSON Schema string with root
+`"type":"object"`. It is parsed once at startup and limited to 64 KiB of UTF-8.
+Supplying a schema in any other mode, or an empty, malformed, or non-object-root
+schema, fails startup. Requests use schema name `vlmanalysis` and `strict=true`.
+The provider validates its supported schema subset and enforces adherence.
+
+Both JSON modes locally reject malformed JSON and non-object responses after
+completion-status checks. Results preserve the original JSON string, including
+whitespace, in `vlmanalysis-result.text`; they do not create typed `GstStructure`
+fields. These checks establish JSON syntax and object shape, not schema
+adherence or factual accuracy.
+
+For a compatible model served at the default local endpoint:
+
+```sh
+schema='{"type":"object","properties":{"scene":{"type":"string"}},"required":["scene"],"additionalProperties":false}'
+gst-launch-1.0 -m \
+  videotestsrc \
+  ! videoconvert \
+  ! jpegenc \
+  ! vlmanalysis \
+      model=your-model \
+      response-format=json-schema \
+      response-schema="$schema" \
+      user-prompt="Return a JSON object describing the scene." \
+  ! fakesink
+```
+
 ## Sampling and lifecycle
 
 `analysis-interval` defaults to five seconds and uses buffer PTS; zero selects

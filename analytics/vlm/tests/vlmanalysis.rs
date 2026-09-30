@@ -833,6 +833,152 @@ fn worker_refused_and_incomplete_responses_are_sanitized_and_recoverable() {
 }
 
 #[test]
+fn structured_output_posts_original_json_and_recovers_after_invalid_content() {
+    let schema = r#"{"type":"object","properties":{"scene":{"type":"string"}},"required":["scene"],"additionalProperties":false}"#;
+    let text = " \n{\"scene\":\"street\"}\t ";
+    let success = Reply::json(
+        &serde_json::json!({"choices": [{"message": {"content": text}, "finish_reason": "stop"}]})
+            .to_string(),
+    );
+    let server = make_server(vec![
+        Reply::json(
+            r#"{"choices":[{"message":{"content":"private malformed JSON"},"finish_reason":"stop"}]}"#,
+        ),
+        success,
+    ]);
+    let element = make_element(&server.endpoint);
+    element.set_property_from_str("response-format", "json-schema");
+    element.set_property("response-schema", schema);
+    element.set_property("user-prompt", "Return a JSON object describing the scene.");
+    let bus = gst::Bus::new();
+    element.set_bus(Some(&bus));
+    let mut harness = make_harness(&element);
+    for id in 1..=2 {
+        assert_eq!(
+            harness.push(jpeg(b"frame", Some(gst::ClockTime::from_seconds(id)))),
+            Ok(gst::FlowSuccess::Ok)
+        );
+        let request = server
+            .requests
+            .recv_timeout(Duration::from_secs(2))
+            .expect("recording structured request");
+        let wire: serde_json::Value =
+            serde_json::from_slice(&request.body).expect("parsing structured request");
+        assert_eq!(
+            wire["response_format"],
+            serde_json::json!({"type": "json_schema", "json_schema": {"name": "vlmanalysis", "strict": true, "schema": serde_json::from_str::<serde_json::Value>(schema).expect("fixture schema")}})
+        );
+        wait_for_outcomes(&element, id);
+        let name = if id == 1 {
+            "vlmanalysis-error"
+        } else {
+            "vlmanalysis-result"
+        };
+        let structure = wait_for_structure(&bus, name).expect("structured response outcome");
+        assert_eq!(structure.get::<u64>("request-id"), Ok(id));
+        if id == 1 {
+            assert_eq!(structure.get::<String>("kind").as_deref(), Ok("response"));
+            assert_eq!(
+                structure.get::<String>("message").as_deref(),
+                Ok("response content is not valid JSON")
+            );
+            assert!(!structure.to_string().contains("private"));
+            assert_eq!(element.property::<u64>("completed-requests"), 0);
+        } else {
+            assert_eq!(structure.get::<String>("text").as_deref(), Ok(text));
+        }
+    }
+    assert_eq!(element.property::<u64>("submitted-requests"), 2);
+    assert_eq!(element.property::<u64>("failed-requests"), 1);
+    assert_eq!(element.property::<u64>("completed-requests"), 1);
+}
+
+#[test]
+fn structured_output_properties_round_trip_and_accept_schema_limit() {
+    let server = make_server(vec![ok_reply()]);
+    let element = make_element(&server.endpoint);
+    assert_eq!(element.property::<Option<String>>("response-schema"), None);
+    let value = element.property_value("response-format");
+    assert_eq!(
+        gst::glib::EnumValue::from_value(&value)
+            .expect("format enum")
+            .1
+            .nick(),
+        "default"
+    );
+    for (number, nick) in ["default", "text", "json-object", "json-schema"]
+        .into_iter()
+        .enumerate()
+    {
+        element.set_property_from_str("response-format", nick);
+        let value = element.property_value("response-format");
+        let (_class, value) = gst::glib::EnumValue::from_value(&value).expect("format enum");
+        assert_eq!(value.nick(), nick);
+        assert_eq!(
+            usize::try_from(value.value()).expect("nonnegative enum"),
+            number
+        );
+    }
+    let base = r#"{"type":"object"}"#;
+    let schema = format!("{base}{}", " ".repeat(64 * 1024 - base.len()));
+    element.set_property("response-schema", &schema);
+    assert_eq!(element.property::<String>("response-schema"), schema);
+    element
+        .set_state(gst::State::Paused)
+        .expect("schema at limit is accepted");
+    let _state = element.set_state(gst::State::Null);
+    element.set_property("response-schema", None::<String>);
+    assert_eq!(element.property::<Option<String>>("response-schema"), None);
+}
+
+#[test]
+fn structured_output_rejects_invalid_schema_before_requests() {
+    let server = make_server(vec![ok_reply()]);
+    let base = r#"{"type":"object"}"#;
+    let oversized = format!("{base}{}", " ".repeat(64 * 1024 + 1 - base.len()));
+    for (format, schema) in [
+        ("json-schema", None),
+        ("default", Some(r#"{"type":"object"}"#)),
+        ("text", Some(r#"{"type":"object"}"#)),
+        ("json-object", Some(r#"{"type":"object"}"#)),
+        ("json-schema", Some("")),
+        ("json-schema", Some("private malformed schema")),
+        ("json-schema", Some(oversized.as_str())),
+        ("json-schema", Some("[]")),
+        ("json-schema", Some("{}")),
+        ("json-schema", Some(r#"{"type":"string"}"#)),
+    ] {
+        let element = make_element(&server.endpoint);
+        element.set_property_from_str("response-format", format);
+        element.set_property("response-schema", schema);
+        let bus = gst::Bus::new();
+        element.set_bus(Some(&bus));
+        assert_eq!(
+            element.set_state(gst::State::Paused),
+            Err(gst::StateChangeError)
+        );
+        let message = bus
+            .timed_pop_filtered(gst::ClockTime::SECOND, &[gst::MessageType::Error])
+            .expect("sanitized schema error");
+        assert!(matches!(message.view(), gst::MessageView::Error(_)));
+        if let gst::MessageView::Error(error) = message.view() {
+            assert!(!error.error().to_string().contains("private"));
+            assert!(!error.debug().is_some_and(|debug| debug.contains("private")));
+            if schema.is_some_and(|schema| schema.len() > 64 * 1024) {
+                assert!(
+                    error.debug().is_some_and(|debug| debug.contains("response-schema exceeds 64 KiB limit"))
+                );
+            }
+        }
+        let _state = element.set_state(gst::State::Null);
+    }
+    assert!(matches!(
+        server.requests.recv_timeout(Duration::from_millis(50)),
+        Err(mpsc::RecvTimeoutError::Timeout)
+    ));
+}
+
+#[test]
 fn worker_timeout_is_recoverable_and_push_is_nonblocking() {
     let server = make_server(vec![
         Reply {
@@ -1058,6 +1204,8 @@ fn property_mutability_and_counter_lifecycle_reset() {
         "max-tokens",
         "temperature",
         "top-p",
+        "response-format",
+        "response-schema",
         "request-timeout",
         "queue-capacity",
         "max-frame-bytes",

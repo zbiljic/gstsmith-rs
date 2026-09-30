@@ -10,7 +10,7 @@ use gst::prelude::*;
 use gst::subclass::prelude::*;
 use gst_base::subclass::prelude::*;
 
-use crate::backend::{self, BackendError, GenerationRequest};
+use crate::backend::{self, BackendError, GenerationRequest, ResponseFormat};
 use crate::{prompt, runtime};
 
 const DEFAULT_ENDPOINT: &str = "http://127.0.0.1:8000/v1/chat/completions";
@@ -46,6 +46,8 @@ struct Settings {
     max_tokens: u32,
     temperature: f64,
     top_p: f64,
+    response_format: ResponseFormat,
+    response_schema: Option<Arc<str>>,
     request_timeout: u64,
     queue_capacity: u32,
     max_frame_bytes: u64,
@@ -67,6 +69,8 @@ impl Default for Settings {
             max_tokens: DEFAULT_MAX_TOKENS,
             temperature: DEFAULT_TEMPERATURE,
             top_p: DEFAULT_TOP_P,
+            response_format: ResponseFormat::Default,
+            response_schema: None,
             request_timeout: DEFAULT_REQUEST_TIMEOUT,
             queue_capacity: DEFAULT_QUEUE_CAPACITY,
             max_frame_bytes: DEFAULT_MAX_FRAME_BYTES,
@@ -123,6 +127,8 @@ struct WorkerConfig {
     max_tokens: u32,
     temperature: f64,
     top_p: f64,
+    response_format: ResponseFormat,
+    response_schema: Option<Arc<serde_json::Value>>,
     request_timeout: Duration,
 }
 
@@ -446,6 +452,17 @@ impl ObjectImpl for VlmAnalysis {
                     .default_value(DEFAULT_REQUEST_TIMEOUT)
                     .mutable_ready()
                     .build(),
+                glib::ParamSpecEnum::builder::<ResponseFormat>("response-format")
+                    .nick("Response Format")
+                    .blurb("Requested output format; default omits the API field")
+                    .default_value(ResponseFormat::Default)
+                    .mutable_ready()
+                    .build(),
+                glib::ParamSpecString::builder("response-schema")
+                    .nick("Response Schema")
+                    .blurb("JSON Schema object for json-schema mode, at most 64 KiB, parsed at startup")
+                    .mutable_ready()
+                    .build(),
                 glib::ParamSpecUInt::builder("queue-capacity")
                     .nick("Queue Capacity")
                     .blurb("Complete batches waiting for the ordered worker")
@@ -507,6 +524,12 @@ impl ObjectImpl for VlmAnalysis {
             "max-tokens" => set_copy(value, &mut settings.max_tokens),
             "temperature" => set_copy(value, &mut settings.temperature),
             "top-p" => set_copy(value, &mut settings.top_p),
+            "response-format" => set_copy(value, &mut settings.response_format),
+            "response-schema" => {
+                if let Ok(schema) = value.get::<Option<String>>() {
+                    settings.response_schema = schema.map(Arc::from);
+                }
+            }
             "request-timeout" => set_copy(value, &mut settings.request_timeout),
             "queue-capacity" => set_copy(value, &mut settings.queue_capacity),
             "max-frame-bytes" => set_copy(value, &mut settings.max_frame_bytes),
@@ -534,6 +557,8 @@ impl ObjectImpl for VlmAnalysis {
             "max-tokens" => settings.max_tokens.to_value(),
             "temperature" => settings.temperature.to_value(),
             "top-p" => settings.top_p.to_value(),
+            "response-format" => settings.response_format.to_value(),
+            "response-schema" => settings.response_schema.as_deref().to_value(),
             "request-timeout" => settings.request_timeout.to_value(),
             "queue-capacity" => settings.queue_capacity.to_value(),
             "max-frame-bytes" => settings.max_frame_bytes.to_value(),
@@ -787,8 +812,37 @@ fn validate_settings(settings: &Settings) -> Result<WorkerConfig, &'static str> 
         max_tokens: settings.max_tokens,
         temperature: settings.temperature,
         top_p: settings.top_p,
+        response_format: settings.response_format,
+        response_schema: validate_response_schema(settings)?.map(Arc::new),
         request_timeout: Duration::from_nanos(settings.request_timeout),
     })
+}
+
+fn validate_response_schema(
+    settings: &Settings,
+) -> Result<Option<serde_json::Value>, &'static str> {
+    if settings.response_format != ResponseFormat::JsonSchema {
+        return if settings.response_schema.is_some() {
+            Err("response-schema requires response-format=json-schema")
+        } else {
+            Ok(None)
+        };
+    }
+    let schema = settings
+        .response_schema
+        .as_deref()
+        .ok_or("response-schema is required for response-format=json-schema")?;
+    if schema.len() > 64 * 1024 {
+        return Err("response-schema exceeds 64 KiB limit");
+    }
+    let schema: serde_json::Value =
+        serde_json::from_str(schema).map_err(|_error| "response-schema must be valid JSON")?;
+    if !schema.is_object()
+        || schema.get("type").and_then(serde_json::Value::as_str) != Some("object")
+    {
+        return Err("response-schema must be an object with root type object");
+    }
+    Ok(Some(schema))
 }
 
 fn ensure_crypto_provider() -> Result<(), &'static str> {
@@ -845,6 +899,8 @@ async fn worker_loop(
             max_tokens: config.max_tokens,
             temperature: config.temperature,
             top_p: config.top_p,
+            response_format: config.response_format,
+            response_schema: config.response_schema.clone(),
         };
         let outcome = backend::generate(
             &client,

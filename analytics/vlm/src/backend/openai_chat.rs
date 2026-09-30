@@ -4,7 +4,7 @@ use futures_util::StreamExt;
 use reqwest::{Client, StatusCode, Url};
 use serde::{Deserialize, Serialize};
 
-use super::{BackendError, GenerationRequest, GenerationResult, Usage};
+use super::{BackendError, GenerationRequest, GenerationResult, ResponseFormat, Usage};
 use crate::prompt::{Message, Part, Role};
 
 const MAX_RESPONSE_BYTES: usize = 1024 * 1024;
@@ -17,6 +17,23 @@ struct WireRequest<'a> {
     temperature: f64,
     top_p: f64,
     stream: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    response_format: Option<WireResponseFormat<'a>>,
+}
+
+#[derive(Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+enum WireResponseFormat<'a> {
+    Text,
+    JsonObject,
+    JsonSchema { json_schema: WireSchema<'a> },
+}
+
+#[derive(Serialize)]
+struct WireSchema<'a> {
+    name: &'static str,
+    strict: bool,
+    schema: &'a serde_json::Value,
 }
 
 #[derive(Serialize)]
@@ -107,6 +124,21 @@ fn wire_message(message: &Message) -> Result<WireMessage<'_>, BackendError> {
 }
 
 fn serialize(request: &GenerationRequest) -> Result<Vec<u8>, BackendError> {
+    let response_format = match request.response_format {
+        ResponseFormat::Default => None,
+        ResponseFormat::Text => Some(WireResponseFormat::Text),
+        ResponseFormat::JsonObject => Some(WireResponseFormat::JsonObject),
+        ResponseFormat::JsonSchema => Some(WireResponseFormat::JsonSchema {
+            json_schema: WireSchema {
+                name: "vlmanalysis",
+                strict: true,
+                schema: request
+                    .response_schema
+                    .as_deref()
+                    .ok_or(BackendError::Response("response schema is missing"))?,
+            },
+        }),
+    };
     let messages = request
         .messages
         .iter()
@@ -119,11 +151,12 @@ fn serialize(request: &GenerationRequest) -> Result<Vec<u8>, BackendError> {
         temperature: request.temperature,
         top_p: request.top_p,
         stream: false,
+        response_format,
     })
     .map_err(|_error| BackendError::Response("failed to serialize generation request"))
 }
 
-fn parse(body: &[u8]) -> Result<GenerationResult, BackendError> {
+fn parse(body: &[u8], format: ResponseFormat) -> Result<GenerationResult, BackendError> {
     let response: WireResponse = serde_json::from_slice(body)
         .map_err(|_error| BackendError::Response("response is not valid Chat Completions JSON"))?;
     let choice = response
@@ -161,6 +194,18 @@ fn parse(body: &[u8]) -> Result<GenerationResult, BackendError> {
         .ok_or(BackendError::Response(
             "response has no non-empty string message content",
         ))?;
+    if matches!(
+        format,
+        ResponseFormat::JsonObject | ResponseFormat::JsonSchema
+    ) {
+        let json: serde_json::Value = serde_json::from_str(&text)
+            .map_err(|_error| BackendError::Response("response content is not valid JSON"))?;
+        if !json.is_object() {
+            return Err(BackendError::Response(
+                "response content must be a JSON object",
+            ));
+        }
+    }
     let usage = response.usage.map_or(
         Usage {
             prompt_tokens: None,
@@ -245,7 +290,7 @@ pub(super) async fn generate(
             },
             BodyErrorKind::TooLarge => BackendError::Response("response exceeds 1 MiB limit"),
         })?;
-        parse(&body)
+        parse(&body, request.response_format)
     };
     tokio::time::timeout(timeout, operation)
         .await
@@ -288,6 +333,8 @@ mod tests {
             max_tokens: 512,
             temperature: 0.2,
             top_p: 0.9,
+            response_format: ResponseFormat::Default,
+            response_schema: None,
         }
     }
 
@@ -314,6 +361,67 @@ mod tests {
         assert_eq!(value["temperature"], 0.2);
         assert_eq!(value["top_p"], 0.9);
         assert_eq!(value["stream"], false);
+        assert_eq!(value.as_object().map(serde_json::Map::len), Some(6));
+        assert!(value.get("response_format").is_none());
+    }
+
+    #[test]
+    fn openai_chat_serializes_response_formats() {
+        let schema = serde_json::json!({"type": "object", "properties": {}});
+        for (format, expected) in [
+            (ResponseFormat::Text, serde_json::json!({"type": "text"})),
+            (
+                ResponseFormat::JsonObject,
+                serde_json::json!({"type": "json_object"}),
+            ),
+            (
+                ResponseFormat::JsonSchema,
+                serde_json::json!({"type": "json_schema", "json_schema": {"name": "vlmanalysis", "strict": true, "schema": schema}}),
+            ),
+        ] {
+            let mut request = generation(Vec::new());
+            request.response_format = format;
+            request.response_schema = Some(Arc::new(schema.clone()));
+            let wire: serde_json::Value =
+                serde_json::from_slice(&serialize(&request).expect("serializing format"))
+                    .expect("parsing request");
+            assert_eq!(wire["response_format"], expected);
+        }
+    }
+
+    #[test]
+    fn openai_chat_validates_json_objects_after_completion_status() {
+        let object = " \n{\"scene\":\"street\"}\t ";
+        for format in [
+            ResponseFormat::Default,
+            ResponseFormat::Text,
+            ResponseFormat::JsonObject,
+            ResponseFormat::JsonSchema,
+        ] {
+            for content in [
+                object,
+                "private malformed JSON",
+                "[]",
+                "null",
+                "12",
+                "\"string\"",
+            ] {
+                let body = serde_json::json!({"choices": [{"message": {"content": content}, "finish_reason": "stop"}]}).to_string();
+                let result = parse(body.as_bytes(), format);
+                if content == object
+                    || matches!(format, ResponseFormat::Default | ResponseFormat::Text)
+                {
+                    assert_eq!(result.expect("accepted response").text, content);
+                } else {
+                    assert!(matches!(result, Err(BackendError::Response(_))));
+                }
+            }
+            let partial = br#"{"choices":[{"message":{"content":"{"},"finish_reason":"length"}]}"#;
+            assert!(matches!(
+                parse(partial, format),
+                Err(BackendError::Response("response reached the token limit"))
+            ));
+        }
     }
 
     #[test]
@@ -345,10 +453,13 @@ mod tests {
 
     #[test]
     fn openai_chat_parses_usage_presence_and_absence() {
-        let with = parse(br#"{"choices":[{"message":{"content":"ok"}}],"usage":{"prompt_tokens":2,"completion_tokens":3}}"#).expect("parsing response with usage");
+        let with = parse(br#"{"choices":[{"message":{"content":"ok"}}],"usage":{"prompt_tokens":2,"completion_tokens":3}}"#, ResponseFormat::Default).expect("parsing response with usage");
         assert_eq!(with.usage.prompt_tokens, Some(2));
-        let without = parse(br#"{"choices":[{"message":{"content":"ok"}}]}"#)
-            .expect("parsing response without usage");
+        let without = parse(
+            br#"{"choices":[{"message":{"content":"ok"}}]}"#,
+            ResponseFormat::Default,
+        )
+        .expect("parsing response without usage");
         assert_eq!(without.usage.completion_tokens, None);
     }
 
@@ -363,7 +474,7 @@ mod tests {
             br#"{"choices":[{"message":{"content":""}}]}"#,
             br#"{"choices":[{"message":{"content":""}},{"message":{"content":"later"}}]}"#,
         ] {
-            assert!(parse(body).is_err());
+            assert!(parse(body, ResponseFormat::Default).is_err());
         }
     }
 
@@ -377,7 +488,9 @@ mod tests {
             let body =
                 format!(r#"{{"choices":[{{"message":{{"content":"ok","refusal":""}}{fields}}}]}}"#);
             assert_eq!(
-                parse(body.as_bytes()).expect("complete response").text,
+                parse(body.as_bytes(), ResponseFormat::Default)
+                    .expect("complete response")
+                    .text,
                 "ok"
             );
         }
@@ -390,7 +503,7 @@ mod tests {
                 r#"{{"choices":[{{"message":{{"content":{content},"refusal":"private refusal"}},"finish_reason":"length"}}]}}"#
             );
             assert!(matches!(
-                parse(body.as_bytes()),
+                parse(body.as_bytes(), ResponseFormat::Default),
                 Err(BackendError::Response("provider refused the request"))
             ));
         }
@@ -410,7 +523,7 @@ mod tests {
         ] {
             let body = serde_json::json!({"choices": [{"message": {"content": "{\"partial\":"}, "finish_reason": reason}]}).to_string();
             assert!(
-                matches!(parse(body.as_bytes()), Err(BackendError::Response(message)) if message == expected)
+                matches!(parse(body.as_bytes(), ResponseFormat::Default), Err(BackendError::Response(message)) if message == expected)
             );
         }
     }
