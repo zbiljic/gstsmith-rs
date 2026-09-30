@@ -773,6 +773,66 @@ fn worker_http_errors_malformed_oversize_timeout_and_later_recovery_are_sanitize
 }
 
 #[test]
+fn worker_refused_and_incomplete_responses_are_sanitized_and_recoverable() {
+    let marker = "private-provider-content";
+    let cases = [
+        ("stop", Some(marker), "provider refused the request"),
+        ("length", None, "response reached the token limit"),
+        (
+            "content_filter",
+            None,
+            "response was filtered by the provider",
+        ),
+        (marker, None, "response has an unsupported finish reason"),
+    ];
+    let mut replies: Vec<_> = cases
+        .iter()
+        .map(|(reason, refusal, _message)| {
+            Reply::json(
+                &serde_json::json!({"choices": [{
+                    "message": {"content": marker, "refusal": refusal},
+                    "finish_reason": reason
+                }]})
+                .to_string(),
+            )
+        })
+        .collect();
+    replies.push(ok_reply());
+    let server = make_server(replies);
+    let element = make_element(&server.endpoint);
+    let bus = gst::Bus::new();
+    element.set_bus(Some(&bus));
+    let mut harness = make_harness(&element);
+    for (id, (_reason, _refusal, expected)) in (1_u64..).zip(cases) {
+        assert_eq!(
+            harness.push(jpeg(b"frame", Some(gst::ClockTime::from_seconds(id)))),
+            Ok(gst::FlowSuccess::Ok)
+        );
+        wait_for_outcomes(&element, id);
+        let error =
+            wait_for_structure(&bus, "vlmanalysis-error").expect("receiving response error");
+        assert_eq!(error.get::<u64>("request-id"), Ok(id));
+        assert_eq!(error.get::<String>("kind").as_deref(), Ok("response"));
+        assert_eq!(error.get::<String>("message").as_deref(), Ok(expected));
+        assert!(!error.to_string().contains(marker));
+        assert!(!error.has_field("http-status"));
+        assert_eq!(element.property::<u64>("failed-requests"), id);
+        assert_eq!(element.property::<u64>("completed-requests"), 0);
+    }
+    assert_eq!(
+        harness.push(jpeg(b"recovery", Some(gst::ClockTime::from_seconds(5)))),
+        Ok(gst::FlowSuccess::Ok)
+    );
+    wait_for_outcomes(&element, 5);
+    let result = wait_for_structure(&bus, "vlmanalysis-result").expect("receiving recovery result");
+    assert_eq!(result.get::<u64>("request-id"), Ok(5));
+    assert_eq!(result.get::<String>("text").as_deref(), Ok("description"));
+    assert_eq!(element.property::<u64>("submitted-requests"), 5);
+    assert_eq!(element.property::<u64>("failed-requests"), 4);
+    assert_eq!(element.property::<u64>("completed-requests"), 1);
+}
+
+#[test]
 fn worker_timeout_is_recoverable_and_push_is_nonblocking() {
     let server = make_server(vec![
         Reply {

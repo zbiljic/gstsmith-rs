@@ -55,11 +55,13 @@ struct WireResponse {
 #[derive(Deserialize)]
 struct Choice {
     message: ResponseMessage,
+    finish_reason: Option<String>,
 }
 
 #[derive(Deserialize)]
 struct ResponseMessage {
-    content: String,
+    content: Option<String>,
+    refusal: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -124,11 +126,37 @@ fn serialize(request: &GenerationRequest) -> Result<Vec<u8>, BackendError> {
 fn parse(body: &[u8]) -> Result<GenerationResult, BackendError> {
     let response: WireResponse = serde_json::from_slice(body)
         .map_err(|_error| BackendError::Response("response is not valid Chat Completions JSON"))?;
-    let text = response
+    let choice = response
         .choices
         .into_iter()
         .next()
-        .map(|choice| choice.message.content)
+        .ok_or(BackendError::Response("response has no choices"))?;
+    if choice
+        .message
+        .refusal
+        .is_some_and(|refusal| !refusal.is_empty())
+    {
+        return Err(BackendError::Response("provider refused the request"));
+    }
+    match choice.finish_reason.as_deref() {
+        None | Some("stop") => {}
+        Some("length") => {
+            return Err(BackendError::Response("response reached the token limit"));
+        }
+        Some("content_filter") => {
+            return Err(BackendError::Response(
+                "response was filtered by the provider",
+            ));
+        }
+        Some(_) => {
+            return Err(BackendError::Response(
+                "response has an unsupported finish reason",
+            ));
+        }
+    }
+    let text = choice
+        .message
+        .content
         .filter(|content| !content.is_empty())
         .ok_or(BackendError::Response(
             "response has no non-empty string message content",
@@ -330,9 +358,60 @@ mod tests {
             br"not json".as_slice(),
             br#"{"choices":[]}"#,
             br#"{"choices":[{"message":{"content":12}}]}"#,
+            br#"{"choices":[{"message":{}}]}"#,
+            br#"{"choices":[{"message":{"content":null}}]}"#,
             br#"{"choices":[{"message":{"content":""}}]}"#,
+            br#"{"choices":[{"message":{"content":""}},{"message":{"content":"later"}}]}"#,
         ] {
             assert!(parse(body).is_err());
+        }
+    }
+
+    #[test]
+    fn openai_chat_accepts_stop_and_omitted_or_null_finish_reason() {
+        for fields in [
+            "",
+            r#", "finish_reason":null"#,
+            r#", "finish_reason":"stop""#,
+        ] {
+            let body =
+                format!(r#"{{"choices":[{{"message":{{"content":"ok","refusal":""}}{fields}}}]}}"#);
+            assert_eq!(
+                parse(body.as_bytes()).expect("complete response").text,
+                "ok"
+            );
+        }
+    }
+
+    #[test]
+    fn openai_chat_rejects_refusal_before_content_and_finish_reason() {
+        for content in ["null", r#""partial""#] {
+            let body = format!(
+                r#"{{"choices":[{{"message":{{"content":{content},"refusal":"private refusal"}},"finish_reason":"length"}}]}}"#
+            );
+            assert!(matches!(
+                parse(body.as_bytes()),
+                Err(BackendError::Response("provider refused the request"))
+            ));
+        }
+    }
+
+    #[test]
+    fn openai_chat_rejects_incomplete_and_unsupported_finish_reasons() {
+        for (reason, expected) in [
+            ("length", "response reached the token limit"),
+            ("content_filter", "response was filtered by the provider"),
+            ("tool_calls", "response has an unsupported finish reason"),
+            ("function_call", "response has an unsupported finish reason"),
+            (
+                "private unknown reason",
+                "response has an unsupported finish reason",
+            ),
+        ] {
+            let body = serde_json::json!({"choices": [{"message": {"content": "{\"partial\":"}, "finish_reason": reason}]}).to_string();
+            assert!(
+                matches!(parse(body.as_bytes()), Err(BackendError::Response(message)) if message == expected)
+            );
         }
     }
 

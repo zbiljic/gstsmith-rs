@@ -75,6 +75,12 @@ when an HTTP response supplied one. `kind` is `input`, `backpressure`,
 `timeout`, `http`, or `response`. Invalid startup settings and an unavailable
 worker are reported as normal GStreamer errors.
 
+Only the first response choice is used. A nonempty refusal, token-limit
+truncation, content filtering, or any finish reason other than `stop` produces
+a recoverable `response` error, even when text is present. Omitted or null
+finish reasons are accepted for compatible providers. Missing, null, or empty
+message content is rejected. Later requests continue normally.
+
 Messages and logs do not include response bodies, prompts, request JSON, image
 data, authorization headers, credentials, or credential paths.
 
