@@ -656,8 +656,8 @@ dependencies = [
  "compression-core",
  "flate2",
  "memchr",
- "zstd",
- "zstd-safe",
+ "zstd 0.13.3",
+ "zstd-safe 7.2.4",
 ]
 
 [[package]]
@@ -1557,7 +1557,7 @@ dependencies = [
  "gstreamer",
  "gstreamer-base",
  "gstreamer-check",
- "s2-sdk",
+ "s2-sdk 0.34.10",
  "s2-testcontainers",
  "tokio",
  "tokio-util",
@@ -3606,14 +3606,40 @@ dependencies = [
  "itertools 0.15.0",
  "mime",
  "prost",
- "s2-common",
+ "s2-common 0.41.1",
  "serde",
  "serde_json",
  "strum",
  "thiserror",
  "time",
  "tokio-util",
- "zstd",
+ "zstd 0.13.3",
+]
+
+[[package]]
+name = "s2-api"
+version = "0.32.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6cbdd02143863cf1af1e95daa0627ac0d5093aab6a782f173d6392b3c62bf7b7"
+dependencies = [
+ "base64ct",
+ "bytes",
+ "compact_str",
+ "flate2",
+ "futures-core",
+ "futures-util",
+ "http",
+ "itertools 0.15.0",
+ "mime",
+ "prost",
+ "s2-common 0.42.0",
+ "serde",
+ "serde_json",
+ "strum",
+ "thiserror",
+ "time",
+ "tokio-util",
+ "zstd 0.14.0",
 ]
 
 [[package]]
@@ -3621,6 +3647,25 @@ name = "s2-common"
 version = "0.41.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0aa0280e065047540a00a7f99a16ed7b171f70b9ffbcf5f79b56fb21df23e3a1"
+dependencies = [
+ "base64ct",
+ "bytes",
+ "compact_str",
+ "enumset",
+ "http",
+ "rand 0.10.2",
+ "secrecy",
+ "serde",
+ "strum",
+ "thiserror",
+ "time",
+]
+
+[[package]]
+name = "s2-common"
+version = "0.42.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "509e6cdea529484ea95692cb5c191e188b852f9b700bbe2827d0ceddd461d01e"
 dependencies = [
  "base64ct",
  "bytes",
@@ -3658,8 +3703,49 @@ dependencies = [
  "prost",
  "rand 0.10.2",
  "rustls",
- "s2-api",
- "s2-common",
+ "s2-api 0.31.3",
+ "s2-common 0.41.1",
+ "secrecy",
+ "serde",
+ "serde_json",
+ "serde_urlencoded",
+ "thiserror",
+ "time",
+ "tokio",
+ "tokio-muxt",
+ "tokio-stream",
+ "tokio-util",
+ "tracing",
+ "urlencoding",
+ "uuid",
+]
+
+[[package]]
+name = "s2-sdk"
+version = "0.35.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f5be2012183663e8cd76558f5040fd831636b67583e0f4890d1875f0c99a5768"
+dependencies = [
+ "async-compression",
+ "async-stream",
+ "async-trait",
+ "bytes",
+ "compact_str",
+ "futures-core",
+ "futures-util",
+ "h2",
+ "http",
+ "http-body",
+ "http-body-util",
+ "hyper",
+ "hyper-rustls",
+ "hyper-util",
+ "pin-project-lite",
+ "prost",
+ "rand 0.10.2",
+ "rustls",
+ "s2-api 0.32.0",
+ "s2-common 0.42.0",
  "secrecy",
  "serde",
  "serde_json",
@@ -3677,12 +3763,12 @@ dependencies = [
 
 [[package]]
 name = "s2-testcontainers"
-version = "0.42.14"
+version = "0.43.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fe49a636f5eebb92b7d1973e7c2ef0fe59fdfb1188e539ffebb42ac2fc7ff066"
+checksum = "02f3ed70015a4abaf9afb5e0e47f1de04dd7faee06e0423672dd4e7eb57d8857"
 dependencies = [
  "reqwest",
- "s2-sdk",
+ "s2-sdk 0.35.1",
  "testcontainers",
  "thiserror",
  "tokio",
@@ -5394,7 +5480,16 @@ version = "0.13.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e91ee311a569c327171651566e07972200e76fcfe2242a4fa446149a3881c08a"
 dependencies = [
- "zstd-safe",
+ "zstd-safe 7.2.4",
+]
+
+[[package]]
+name = "zstd"
+version = "0.14.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bf06bd8162af0734b344780deb55b42a2429ae430870d13fcc12f238e880fe6e"
+dependencies = [
+ "zstd-safe 8.0.0",
 ]
 
 [[package]]
@@ -5407,10 +5502,19 @@ dependencies = [
 ]
 
 [[package]]
-name = "zstd-sys"
-version = "2.0.16+zstd.1.5.7"
+name = "zstd-safe"
+version = "8.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "91e19ebc2adc8f83e43039e79776e3fda8ca919132d68a1fed6a5faca2683748"
+checksum = "ae42c0555055784c70058d19ba8e275528e8a99a706684868ace5da4e716a4ab"
+dependencies = [
+ "zstd-sys",
+]
+
+[[package]]
+name = "zstd-sys"
+version = "2.1.0+zstd.1.5.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0ef0a8027ec3ee71300ab3bcbcd0393f434aa72b91ca6d635a39941deae8eea0"
 dependencies = [
  "cc",
  "pkg-config",
