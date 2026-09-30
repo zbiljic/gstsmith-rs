@@ -7,6 +7,7 @@ members = [
     "analytics/tract-inference",
     "analytics/vlm",
     "generic/console",
+    "generic/jsontap",
     "net/nats",
     "net/s2",
     "text/lines",

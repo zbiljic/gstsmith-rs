@@ -163,6 +163,7 @@ jobs:
         run: |
           cargo check --all-targets \
             -p gst-plugin-console \
+            -p gst-plugin-jsontap \
             -p gst-plugin-lines \
             -p gst-plugin-nats \
             -p gst-plugin-s2 \
@@ -175,6 +176,7 @@ jobs:
         run: |
           cargo test --all-targets \
             -p gst-plugin-console \
+            -p gst-plugin-jsontap \
             -p gst-plugin-lines \
             -p gst-plugin-nats \
             -p gst-plugin-s2 \
@@ -187,6 +189,7 @@ jobs:
         run: |
           cargo clippy --all-targets \
             -p gst-plugin-console \
+            -p gst-plugin-jsontap \
             -p gst-plugin-lines \
             -p gst-plugin-nats \
             -p gst-plugin-s2 \
@@ -276,6 +279,11 @@ jobs:
         env:
           GST_PLUGIN_PATH: ${{ github.workspace }}/target/debug
         run: gst-inspect-1.0 console
+
+      - name: Inspect jsontap plugin
+        env:
+          GST_PLUGIN_PATH: ${{ github.workspace }}/target/debug
+        run: gst-inspect-1.0 jsontap
 
       - name: Inspect Prometheus plugin
         env:

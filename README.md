@@ -13,6 +13,9 @@ and elements written in Rust.
     - `consoleprint`: Print text-oriented buffers and pass them downstream
       unchanged.
     - `consolesink`: Write exact bytes to standard output or error.
+  - [`jsontap`](generic/jsontap/): Passthrough inspection tap.
+    - `jsontap`: Record every buffer (timestamps, flags, size, metas),
+      caps change, and end of stream as one JSON line each.
 
 - [`analytics`](analytics/)
 
