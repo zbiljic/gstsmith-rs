@@ -190,18 +190,7 @@ With multiple frames, the result is undifferentiated batch-level text tied only
 to the batch's start and end PTS. Use a dedicated OCR system when typed OCR
 fields are required.
 
-## Live smoke test
+## Testing
 
-Local tests use loopback servers. To run the ignored test against a compatible
-endpoint:
-
-```sh
-VLM_TEST_ENDPOINT="https://provider.example/v1/chat/completions" \
-VLM_TEST_MODEL="model-name" \
-VLM_TEST_API_KEY_FILE="/path/to/key" \
-cargo test -p gst-plugin-vlm --test vlmanalysis live_openai_compatible_smoke \
-  -- --ignored --exact
-```
-
-`VLM_TEST_API_KEY_FILE` is optional. The test sends a generated one-pixel JPEG;
-do not use an endpoint where that request is unwanted or billable.
+See [Testing vlmanalysis](TESTING.md) for offline tests and opt-in live checks,
+including endpoint configuration, exact JSON assertions, and schema probes.

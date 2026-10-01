@@ -1418,30 +1418,140 @@ fn property_mutability_and_counter_lifecycle_reset() {
     assert_eq!(element.property::<u64>("completed-requests"), 1);
 }
 
+fn live_smoke_image() -> Vec<u8> {
+    if let Ok(path) = std::env::var("VLM_TEST_IMAGE_FILE") {
+        return std::fs::read(path).expect("reading VLM_TEST_IMAGE_FILE as JPEG");
+    }
+    base64::engine::general_purpose::STANDARD
+        .decode("/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAP//////////////////////////////////////////////////////////////////////////////////////2wBDAf//////////////////////////////////////////////////////////////////////////////////////wAARCAABAAEDASIAAhEBAxEB/8QAFQABAQAAAAAAAAAAAAAAAAAAAAf/xAAUEAEAAAAAAAAAAAAAAAAAAAAA/9oADAMBAAIQAxAAAAF//8QAFBABAAAAAAAAAAAAAAAAAAAAAP/aAAgBAQABBQJ//8QAFBEBAAAAAAAAAAAAAAAAAAAAAP/aAAgBAwEBPwF//8QAFBEBAAAAAAAAAAAAAAAAAAAAAP/aAAgBAgEBPwF//8QAFBABAAAAAAAAAAAAAAAAAAAAAP/aAAgBAQAGPwJ//8QAFBABAAAAAAAAAAAAAAAAAAAAAP/aAAgBAQABPyF//9oADAMBAAIAAwAAABD/xAAUEQEAAAAAAAAAAAAAAAAAAAAA/9oACAEDAQE/EB//xAAUEQEAAAAAAAAAAAAAAAAAAAAA/9oACAECAQE/EB//xAAUEAEAAAAAAAAAAAAAAAAAAAAA/9oACAEBAAE/EB//2Q==")
+        .expect("decoding generated 1x1 JPEG fixture")
+}
+
+fn live_smoke_element() -> (gst::Element, gst::ClockTime) {
+    let endpoint = std::env::var("VLM_TEST_ENDPOINT").expect("VLM_TEST_ENDPOINT is required");
+    let model = std::env::var("VLM_TEST_MODEL").expect("VLM_TEST_MODEL is required");
+    let timeout = std::env::var("VLM_TEST_TIMEOUT_SECONDS")
+        .map_or(Ok(120), |value| value.parse::<u32>())
+        .expect("VLM_TEST_TIMEOUT_SECONDS must be an unsigned integer");
+    assert!(timeout > 0, "VLM_TEST_TIMEOUT_SECONDS must be nonzero");
+    let element = make_element(&endpoint);
+    element.set_property("model", model);
+    element.set_property("request-timeout", u64::from(timeout) * 1_000_000_000);
+    let insecure = std::env::var("VLM_TEST_ALLOW_INSECURE_HTTP")
+        .map_or(Ok(false), |value| value.parse::<bool>())
+        .expect("VLM_TEST_ALLOW_INSECURE_HTTP must be true or false");
+    element.set_property("allow-insecure-http", insecure);
+    for (variable, property) in [
+        ("VLM_TEST_API_KEY_FILE", "api-key-file"),
+        ("VLM_TEST_USER_PROMPT", "user-prompt"),
+        ("VLM_TEST_RESPONSE_SCHEMA", "response-schema"),
+        ("VLM_TEST_REASONING_EFFORT", "reasoning-effort"),
+    ] {
+        if let Ok(value) = std::env::var(variable) {
+            element.set_property(property, value);
+        }
+    }
+    for (variable, property) in [
+        ("VLM_TEST_RESPONSE_FORMAT", "response-format"),
+        ("VLM_TEST_TOKEN_LIMIT_MODE", "token-limit-mode"),
+        ("VLM_TEST_SAMPLING_MODE", "sampling-mode"),
+    ] {
+        if let Ok(value) = std::env::var(variable) {
+            element.set_property_from_str(property, &value);
+        }
+    }
+    if let Ok(value) = std::env::var("VLM_TEST_MAX_TOKENS") {
+        element.set_property(
+            "max-tokens",
+            value
+                .parse::<u32>()
+                .expect("VLM_TEST_MAX_TOKENS must be an unsigned integer"),
+        );
+    }
+    (
+        element,
+        gst::ClockTime::from_seconds(u64::from(timeout) + 5),
+    )
+}
+
 #[test]
 #[ignore = "requires VLM_TEST_ENDPOINT and VLM_TEST_MODEL"]
 fn live_openai_compatible_smoke() {
     init();
-    let Ok(endpoint) = std::env::var("VLM_TEST_ENDPOINT") else {
-        return;
-    };
-    let Ok(model) = std::env::var("VLM_TEST_MODEL") else {
-        return;
-    };
-    let mut builder = gst::ElementFactory::make("vlmanalysis")
-        .property("endpoint", endpoint)
-        .property("model", model);
-    if let Ok(key_file) = std::env::var("VLM_TEST_API_KEY_FILE") {
-        builder = builder.property("api-key-file", key_file);
-    }
-    let element = builder.build().expect("constructing live smoke element");
+    let expected_json = std::env::var("VLM_TEST_EXPECT_JSON").ok().map(|text| {
+        let value: serde_json::Value =
+            serde_json::from_str(&text).expect("VLM_TEST_EXPECT_JSON must be valid JSON");
+        assert!(
+            value.is_object(),
+            "VLM_TEST_EXPECT_JSON must be a JSON object"
+        );
+        value
+    });
+    let image = live_smoke_image();
+    let (element, wait_timeout) = live_smoke_element();
+    let format = element.property_value("response-format");
+    let json = matches!(
+        gst::glib::EnumValue::from_value(&format)
+            .expect("response-format enum")
+            .1
+            .nick(),
+        "json-object" | "json-schema"
+    );
+    let bus = gst::Bus::new();
+    element.set_bus(Some(&bus));
     let mut harness = make_harness(&element);
-    let tiny_jpeg = base64::engine::general_purpose::STANDARD
-        .decode("/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAP//////////////////////////////////////////////////////////////////////////////////////2wBDAf//////////////////////////////////////////////////////////////////////////////////////wAARCAABAAEDASIAAhEBAxEB/8QAFQABAQAAAAAAAAAAAAAAAAAAAAf/xAAUEAEAAAAAAAAAAAAAAAAAAAAA/9oADAMBAAIQAxAAAAF//8QAFBABAAAAAAAAAAAAAAAAAAAAAP/aAAgBAQABBQJ//8QAFBEBAAAAAAAAAAAAAAAAAAAAAP/aAAgBAwEBPwF//8QAFBEBAAAAAAAAAAAAAAAAAAAAAP/aAAgBAgEBPwF//8QAFBABAAAAAAAAAAAAAAAAAAAAAP/aAAgBAQAGPwJ//8QAFBABAAAAAAAAAAAAAAAAAAAAAP/aAAgBAQABPyF//9oADAMBAAIAAwAAABD/xAAUEQEAAAAAAAAAAAAAAAAAAAAA/9oACAEDAQE/EB//xAAUEQEAAAAAAAAAAAAAAAAAAAAA/9oACAECAQE/EB//xAAUEAEAAAAAAAAAAAAAAAAAAAAA/9oACAEBAAE/EB//2Q==")
-        .expect("decoding generated 1x1 JPEG fixture");
     assert_eq!(
-        harness.push(jpeg(&tiny_jpeg, Some(gst::ClockTime::ZERO))),
+        harness.push(jpeg(&image, Some(gst::ClockTime::ZERO))),
         Ok(gst::FlowSuccess::Ok)
     );
-    wait_for_counter(&element, "completed-requests", 1);
+    let message = bus
+        .timed_pop_filtered(
+            wait_timeout,
+            &[gst::MessageType::Element, gst::MessageType::Error],
+        )
+        .expect("live request did not post a result or error before its deadline");
+    if let gst::MessageView::Error(error) = message.view() {
+        eprintln!("live pipeline error: {}", error.error());
+    }
+    let structure = message.structure().expect("live request outcome structure");
+    if structure.name() == "vlmanalysis-error" {
+        eprintln!(
+            "live request failed: kind={:?}, status={:?}, message={:?}",
+            structure.get::<String>("kind").ok(),
+            structure.get::<u32>("http-status").ok(),
+            structure.get::<String>("message").ok(),
+        );
+    }
+    assert_eq!(element.property::<u64>("completed-requests"), 1);
+    assert_eq!(element.property::<u64>("failed-requests"), 0);
+    assert_eq!(structure.name(), "vlmanalysis-result");
+    let text = structure.get::<String>("text").expect("live result text");
+    assert!(!text.trim().is_empty(), "live result must contain text");
+    if json || expected_json.is_some() {
+        let value: serde_json::Value = serde_json::from_str(&text).expect("live result is JSON");
+        assert!(value.is_object(), "live result must be a JSON object");
+        if let Some(expected) = expected_json {
+            assert!(
+                value == expected,
+                "live result differs from VLM_TEST_EXPECT_JSON"
+            );
+        }
+    }
+    if let Ok(expected) = std::env::var("VLM_TEST_EXPECT_TEXT") {
+        assert!(
+            text.contains(&expected),
+            "live result lacks the expected substring"
+        );
+    }
+    for field in [
+        "request-id",
+        "latency",
+        "prompt-tokens",
+        "completion-tokens",
+        "reasoning-tokens",
+    ] {
+        if let Ok(value) = structure.get::<u64>(field) {
+            eprintln!("{field}={value}");
+        }
+    }
 }
