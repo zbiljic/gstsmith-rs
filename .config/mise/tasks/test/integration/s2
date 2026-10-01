@@ -8,8 +8,11 @@ if ! docker info >/dev/null 2>&1; then
   exit 1
 fi
 
+s2_image_tag=$(sed -n 's/^s2-testcontainers = "=\([^"]*\)"$/\1/p' net/s2/Cargo.toml)
+: "${s2_image_tag:?Could not read the pinned s2-testcontainers version}"
+
 for attempt in 1 2 3; do
-  docker pull ghcr.io/s2-streamstore/s2:0.41.1 && break
+  docker pull "ghcr.io/s2-streamstore/s2:$s2_image_tag" && break
   if [ "$attempt" = 3 ]; then
     echo "Could not pull the pinned S2 Lite image after three attempts."
     exit 1
