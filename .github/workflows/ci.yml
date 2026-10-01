@@ -214,10 +214,29 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v7
 
+      - name: Prepare APT cache
+        id: apt-cache-key
+        run: |
+          . /etc/os-release
+          mkdir -p "$HOME/.cache/apt/archives/partial"
+          echo "key=apt-v1-${ID}-${VERSION_ID}-$(dpkg --print-architecture)-${{ hashFiles('.github/workflows/ci.yml') }}-$(date -u +%G-%V)" >> "$GITHUB_OUTPUT"
+          echo "prefix=apt-v1-${ID}-${VERSION_ID}-$(dpkg --print-architecture)-${{ hashFiles('.github/workflows/ci.yml') }}-" >> "$GITHUB_OUTPUT"
+
+      - name: Restore APT packages
+        id: apt-cache
+        uses: actions/cache/restore@v6
+        with:
+          path: ~/.cache/apt/archives/*.deb
+          key: ${{ steps.apt-cache-key.outputs.key }}
+          restore-keys: ${{ steps.apt-cache-key.outputs.prefix }}
+
       - name: Install GStreamer
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
+          sudo apt-get \
+            -o Dir::Cache::archives="$HOME/.cache/apt/archives" \
+            -o APT::Keep-Downloaded-Packages=true \
+            install -y --no-install-recommends \
             gstreamer1.0-plugins-base \
             gstreamer1.0-plugins-bad \
             gstreamer1.0-tools \
@@ -231,6 +250,13 @@ jobs:
           pkg-config --modversion gstreamer-1.0
           pkg-config --modversion gstreamer-analytics-1.0
           gst-inspect-1.0 tensordecodebin
+
+      - name: Save APT packages
+        if: steps.apt-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v6
+        with:
+          path: ~/.cache/apt/archives/*.deb
+          key: ${{ steps.apt-cache-key.outputs.key }}
 
       - name: Setup mise
         uses: jdx/mise-action@v4
