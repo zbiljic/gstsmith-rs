@@ -12,7 +12,8 @@ use std::time::{Duration, Instant};
 use gst::prelude::*;
 use s2_sdk::types::{
     AppendInput, AppendRecord, AppendRecordBatch, BasinName, CommandRecord, EnsureBasinInput,
-    EnsureStreamInput, FencingToken, ReadInput, ReadLimits, ReadStop, StreamName,
+    EnsureStreamInput, FencingToken, ReadInput, ReadLimits, ReadStop, S2Config, S2Endpoints,
+    StreamName,
 };
 use s2_testcontainers::{DEFAULT_ACCESS_TOKEN, S2Lite};
 
@@ -21,6 +22,18 @@ fn runtime() -> tokio::runtime::Runtime {
         .enable_all()
         .build()
         .expect("creating S2 Lite test runtime")
+}
+
+fn client(runtime: &tokio::runtime::Runtime, lite: &S2Lite) -> s2_sdk::S2 {
+    let _runtime_guard = runtime.enter();
+    // Use the plugin's SDK so testcontainers can depend on a different SDK version.
+    let endpoints = S2Endpoints::for_endpoint(lite.endpoint()).expect("valid S2 Lite endpoint");
+    s2_sdk::S2::new(
+        S2Config::new(DEFAULT_ACCESS_TOKEN)
+            .with_rustls_ring_crypto_provider()
+            .with_endpoints(endpoints),
+    )
+    .expect("S2 Lite client using the plugin's SDK")
 }
 
 fn unique_names(label: &str) -> (BasinName, StreamName) {
@@ -185,7 +198,7 @@ fn sink_source_round_trip_durability_metadata_and_command_rejection() {
     common::init();
     let runtime = runtime();
     let lite = runtime.block_on(S2Lite::start()).expect("starting S2 Lite");
-    let client = lite.client().expect("S2 Lite client");
+    let client = client(&runtime, &lite);
     let (basin_name, stream_name) = unique_names("roundtrip");
     runtime
         .block_on(client.ensure_basin(EnsureBasinInput::new(basin_name.clone())))
@@ -446,7 +459,7 @@ fn eos_flush_stop_resumes_the_same_producer() {
     let runtime = runtime();
     let _runtime_guard = runtime.enter();
     let lite = runtime.block_on(S2Lite::start()).expect("starting S2 Lite");
-    let client = lite.client().expect("S2 Lite client");
+    let client = client(&runtime, &lite);
     let (basin_name, stream_name) = unique_names("eos-resume");
     ensure_stream(&runtime, &client, &basin_name, &stream_name);
     let token = token_file("eos-resume");
@@ -506,7 +519,7 @@ fn normal_stop_drains_accepted_records() {
     common::init();
     let runtime = runtime();
     let lite = runtime.block_on(S2Lite::start()).expect("starting S2 Lite");
-    let client = lite.client().expect("S2 Lite client");
+    let client = client(&runtime, &lite);
     let (basin_name, stream_name) = unique_names("normal-stop");
     ensure_stream(&runtime, &client, &basin_name, &stream_name);
     let token = token_file("normal-stop");
@@ -545,7 +558,7 @@ fn idle_tail_source_cancellation_is_bounded() {
     common::init();
     let runtime = runtime();
     let lite = runtime.block_on(S2Lite::start()).expect("starting S2 Lite");
-    let client = lite.client().expect("S2 Lite client");
+    let client = client(&runtime, &lite);
     let (basin_name, stream_name) = unique_names("idle");
     runtime
         .block_on(client.ensure_basin(EnsureBasinInput::new(basin_name.clone())))
@@ -611,7 +624,7 @@ fn append_precondition_failures_are_terminal() {
     common::init();
     let runtime = runtime();
     let lite = runtime.block_on(S2Lite::start()).expect("starting S2 Lite");
-    let client = lite.client().expect("S2 Lite client");
+    let client = client(&runtime, &lite);
     let token = token_file("preconditions");
 
     let (match_basin, match_stream) = unique_names("match-failure");
