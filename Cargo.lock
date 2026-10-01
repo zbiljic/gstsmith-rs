@@ -1557,7 +1557,7 @@ dependencies = [
  "gstreamer",
  "gstreamer-base",
  "gstreamer-check",
- "s2-sdk 0.34.10",
+ "s2-sdk",
  "s2-testcontainers",
  "tokio",
  "tokio-util",
@@ -3592,32 +3592,6 @@ checksum = "9774ba4a74de5f7b1c1451ed6cd5285a32eddb5cccb8cc655a4e50009e06477f"
 
 [[package]]
 name = "s2-api"
-version = "0.31.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d22ea3d315f62cd556474b2fc7618b70b0d8f4395d9f6f91902278270a085c61"
-dependencies = [
- "base64ct",
- "bytes",
- "compact_str",
- "flate2",
- "futures-core",
- "futures-util",
- "http",
- "itertools 0.15.0",
- "mime",
- "prost",
- "s2-common 0.41.1",
- "serde",
- "serde_json",
- "strum",
- "thiserror",
- "time",
- "tokio-util",
- "zstd 0.13.3",
-]
-
-[[package]]
-name = "s2-api"
 version = "0.32.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6cbdd02143863cf1af1e95daa0627ac0d5093aab6a782f173d6392b3c62bf7b7"
@@ -3632,7 +3606,7 @@ dependencies = [
  "itertools 0.15.0",
  "mime",
  "prost",
- "s2-common 0.42.0",
+ "s2-common",
  "serde",
  "serde_json",
  "strum",
@@ -3640,25 +3614,6 @@ dependencies = [
  "time",
  "tokio-util",
  "zstd 0.14.0",
-]
-
-[[package]]
-name = "s2-common"
-version = "0.41.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0aa0280e065047540a00a7f99a16ed7b171f70b9ffbcf5f79b56fb21df23e3a1"
-dependencies = [
- "base64ct",
- "bytes",
- "compact_str",
- "enumset",
- "http",
- "rand 0.10.2",
- "secrecy",
- "serde",
- "strum",
- "thiserror",
- "time",
 ]
 
 [[package]]
@@ -3678,46 +3633,6 @@ dependencies = [
  "strum",
  "thiserror",
  "time",
-]
-
-[[package]]
-name = "s2-sdk"
-version = "0.34.10"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a7dd4492fcd5398fcc8895b95b1847a0de8e00d789549f8bf6d46ddd8b18d2b4"
-dependencies = [
- "async-compression",
- "async-stream",
- "async-trait",
- "bytes",
- "futures-core",
- "futures-util",
- "h2",
- "http",
- "http-body",
- "http-body-util",
- "hyper",
- "hyper-rustls",
- "hyper-util",
- "pin-project-lite",
- "prost",
- "rand 0.10.2",
- "rustls",
- "s2-api 0.31.3",
- "s2-common 0.41.1",
- "secrecy",
- "serde",
- "serde_json",
- "serde_urlencoded",
- "thiserror",
- "time",
- "tokio",
- "tokio-muxt",
- "tokio-stream",
- "tokio-util",
- "tracing",
- "urlencoding",
- "uuid",
 ]
 
 [[package]]
@@ -3744,8 +3659,8 @@ dependencies = [
  "prost",
  "rand 0.10.2",
  "rustls",
- "s2-api 0.32.0",
- "s2-common 0.42.0",
+ "s2-api",
+ "s2-common",
  "secrecy",
  "serde",
  "serde_json",
@@ -3768,7 +3683,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "02f3ed70015a4abaf9afb5e0e47f1de04dd7faee06e0423672dd4e7eb57d8857"
 dependencies = [
  "reqwest",
- "s2-sdk 0.35.1",
+ "s2-sdk",
  "testcontainers",
  "thiserror",
  "tokio",
