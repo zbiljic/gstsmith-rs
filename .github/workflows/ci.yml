@@ -22,11 +22,35 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
-  tract-metal:
+  changes:
     if: >-
       ${{ github.event_name != 'pull_request' ||
           github.event.pull_request.head.repo.full_name != github.repository ||
           !startsWith(github.head_ref, 'renovate/') }}
+    name: Select checks
+    runs-on: ${{ vars.RUNNER || 'ubuntu-26.04' }}
+    timeout-minutes: 5
+    outputs:
+      checks: ${{ steps.changes.outputs.checks }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Validate check selection
+        run: python3 -B ci/test_select_checks.py
+
+      - name: Select checks
+        id: changes
+        shell: bash
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+        run: python3 ci/select_checks.py "$BASE_SHA" | tee -a "$GITHUB_OUTPUT"
+
+  tract-metal:
+    needs: changes
+    if: fromJSON(needs.changes.outputs.checks).tract
     name: Test Tract Metal provider
     runs-on: ${{ vars.RUNNER_MACOS || 'macos-26' }}
     timeout-minutes: 60
@@ -70,10 +94,8 @@ jobs:
         run: cargo +"$MSRV" test --locked -p gst-plugin-tract-inference --all-targets --features metal
 
   ort-coreml:
-    if: >-
-      ${{ github.event_name != 'pull_request' ||
-          github.event.pull_request.head.repo.full_name != github.repository ||
-          !startsWith(github.head_ref, 'renovate/') }}
+    needs: changes
+    if: fromJSON(needs.changes.outputs.checks).ort
     name: Test ONNX Runtime CoreML provider
     runs-on: ${{ vars.RUNNER_MACOS || 'macos-26' }}
     timeout-minutes: 60
@@ -125,10 +147,8 @@ jobs:
         run: cargo +"$MSRV" test --locked -p gst-plugin-ort-inference --all-targets --features coreml
 
   gstreamer-124:
-    if: >-
-      ${{ github.event_name != 'pull_request' ||
-          github.event.pull_request.head.repo.full_name != github.repository ||
-          !startsWith(github.head_ref, 'renovate/') }}
+    needs: changes
+    if: fromJSON(needs.changes.outputs.checks).gstreamer124
     name: Check GStreamer 1.24 plugins
     runs-on: ${{ vars.RUNNER_UBUNTU_2404 || 'ubuntu-24.04' }}
     timeout-minutes: 60
@@ -197,10 +217,11 @@ jobs:
             -- -D warnings
 
   checks:
+    needs: changes
     if: >-
-      ${{ github.event_name != 'pull_request' ||
-          github.event.pull_request.head.repo.full_name != github.repository ||
-          !startsWith(github.head_ref, 'renovate/') }}
+      ${{ !cancelled() &&
+          (needs.changes.result == 'failure' ||
+           (needs.changes.result == 'success' && fromJSON(needs.changes.outputs.checks).any)) }}
     name: Run Checks
     runs-on: ${{ vars.RUNNER || 'ubuntu-26.04' }}
     timeout-minutes: 60
@@ -211,6 +232,12 @@ jobs:
           - 4222:4222
 
     steps:
+      - name: Require successful check selection
+        if: needs.changes.result != 'success'
+        run: |
+          echo "Check selection failed; refusing to skip validation."
+          exit 1
+
       - name: Checkout
         uses: actions/checkout@v7
 
@@ -267,63 +294,79 @@ jobs:
           cache-targets: false
 
       - name: Check dependency policy
+        # Advisories can change without a repository diff.
         run: mise run deps:check
 
       - name: Check dependency ordering
+        if: fromJSON(needs.changes.outputs.checks).sort
         run: mise run sort:crates:check
 
       - name: Check formatting
+        if: fromJSON(needs.changes.outputs.checks).format
         run: mise run fmt:check
 
       - name: Run clippy
+        if: fromJSON(needs.changes.outputs.checks).rust
         run: mise run lint
 
       - name: Check build
+        if: fromJSON(needs.changes.outputs.checks).rust
         run: mise run check
 
       - name: Run tests
+        if: fromJSON(needs.changes.outputs.checks).rust
         run: mise run test
 
       - name: Run Core NATS integration tests
+        if: fromJSON(needs.changes.outputs.checks).nats
         env:
           NATS_TEST_URL: nats://127.0.0.1:4222
         run: mise run test:integration:nats
 
       - name: Run S2 Lite integration tests
+        if: fromJSON(needs.changes.outputs.checks).s2
         run: mise run test:integration:s2
 
       - name: Build plugins
+        if: fromJSON(needs.changes.outputs.checks).packaging
         run: mise run build
 
       - name: Validate cargo-c packages
+        if: fromJSON(needs.changes.outputs.checks).packaging
         run: mise run package:check
 
       - name: Inspect console plugin
+        if: fromJSON(needs.changes.outputs.checks).packaging
         env:
           GST_PLUGIN_PATH: ${{ github.workspace }}/target/debug
         run: gst-inspect-1.0 console
 
       - name: Inspect Prometheus plugin
+        if: fromJSON(needs.changes.outputs.checks).packaging
         env:
           GST_PLUGIN_PATH: ${{ github.workspace }}/target/debug
         run: gst-inspect-1.0 prometheus
 
       - name: Inspect StatsD plugin
+        if: fromJSON(needs.changes.outputs.checks).packaging
         env:
           GST_PLUGIN_PATH: ${{ github.workspace }}/target/debug
         run: gst-inspect-1.0 statsd
 
       - name: Inspect lines plugin
+        if: fromJSON(needs.changes.outputs.checks).packaging
         env:
           GST_PLUGIN_PATH: ${{ github.workspace }}/target/debug
         run: gst-inspect-1.0 lines
 
       - name: Inspect NATS plugin
+        if: fromJSON(needs.changes.outputs.checks).packaging
         env:
           GST_PLUGIN_PATH: ${{ github.workspace }}/target/debug
         run: gst-inspect-1.0 nats
 
       - name: Inspect S2 plugin
+        if: fromJSON(needs.changes.outputs.checks).packaging
         env:
           GST_PLUGIN_PATH: ${{ github.workspace }}/target/debug
         run: |
@@ -332,6 +375,7 @@ jobs:
           gst-inspect-1.0 s2sink
 
       - name: Inspect VLM plugin
+        if: fromJSON(needs.changes.outputs.checks).packaging
         env:
           GST_PLUGIN_PATH: ${{ github.workspace }}/target/debug
         run: |
@@ -339,6 +383,7 @@ jobs:
           gst-inspect-1.0 vlmanalysis
 
       - name: Inspect OCRs plugin
+        if: fromJSON(needs.changes.outputs.checks).packaging
         env:
           GST_PLUGIN_PATH: ${{ github.workspace }}/target/debug
         run: |
@@ -346,17 +391,20 @@ jobs:
           gst-inspect-1.0 ocrsanalysis
 
       - name: Inspect Tract inference plugin
+        if: fromJSON(needs.changes.outputs.checks).packaging
         env:
           GST_PLUGIN_PATH: ${{ github.workspace }}/target/debug
         run: |
           gst-inspect-1.0 tractinference
 
       - name: Inspect ONNX Runtime inference plugin
+        if: fromJSON(needs.changes.outputs.checks).packaging
         env:
           GST_PLUGIN_PATH: ${{ github.workspace }}/target/debug
         run: gst-inspect-1.0 ortinference
 
       - name: Inspect NanoDet decoder plugin
+        if: fromJSON(needs.changes.outputs.checks).packaging
         env:
           GST_PLUGIN_PATH: ${{ github.workspace }}/target/debug
         run: |
@@ -364,17 +412,21 @@ jobs:
           gst-inspect-1.0 nanodettensordec
 
       - name: Read minimum supported Rust version
+        if: fromJSON(needs.changes.outputs.checks).rust
         run: |
           sed -n 's/^rust-version = "\([^"]*\)"$/MSRV=\1/p' Cargo.toml >> "$GITHUB_ENV"
 
       - name: Cache minimum supported Rust version toolchain
+        if: fromJSON(needs.changes.outputs.checks).rust
         uses: actions/cache@v6
         with:
           path: ~/.rustup/toolchains/${{ env.MSRV }}-*
           key: rust-msrv-${{ runner.os }}-${{ runner.arch }}-${{ env.MSRV }}
 
       - name: Install minimum supported Rust version toolchain
+        if: fromJSON(needs.changes.outputs.checks).rust
         run: mise install "rust@$MSRV"
 
       - name: Test minimum supported Rust version
+        if: fromJSON(needs.changes.outputs.checks).rust
         run: cargo +"$MSRV" test --workspace --all-targets --locked
