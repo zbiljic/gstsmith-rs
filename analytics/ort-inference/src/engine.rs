@@ -137,7 +137,16 @@ impl SessionPlan {
             }
             #[cfg(feature = "coreml")]
             Provider::Coreml => {
-                let coreml = ort::ep::CoreML::default();
+                // The legacy NeuralNetwork format partitions the ViViT spatial
+                // encoder into many CPU/CoreML subgraphs (~192 ms/frame on an
+                // M3 Max). The MLProgram format compiles the graph for the ANE
+                // and runs it in ~27 ms/frame with bit-identical output, once
+                // the model is exported with static shapes (no frame_mask
+                // NonZero / If control flow).
+                let coreml = ort::ep::CoreML::default()
+                    .with_model_format(ort::ep::coreml::ModelFormat::MLProgram)
+                    .with_compute_units(ort::ep::coreml::ComputeUnits::All)
+                    .with_static_input_shapes(true);
                 let available = coreml.is_available().map_err(|error| {
                     format!("failed to query CoreML execution provider: {error}")
                 })?;
