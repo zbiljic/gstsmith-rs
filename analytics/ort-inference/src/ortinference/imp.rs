@@ -6,7 +6,7 @@ use gst_base::subclass::prelude::*;
 use gst_video::prelude::*;
 
 use crate::engine::{EngineOptions, OrtEngine, Provider};
-use gst_inference_common::model_info::ModelInfo;
+use gst_inference_common::model_info::{CapsContract, ModelInfo, TensorModelInfo};
 use gst_inference_common::preprocess::{ChannelOrder, PixelFormat, preprocess};
 use gst_inference_common::tensor;
 
@@ -53,8 +53,62 @@ pub enum GraphOptimization {
     All = 4,
 }
 
+/// Validated engine options from the ORT element properties.
+fn engine_options(
+    execution_provider: ExecutionProvider,
+    intra_threads: Option<u32>,
+    optimization: GraphOptimization,
+    strict_execution_provider: bool,
+    #[cfg(feature = "coreml")] coreml: crate::coreml::CoreMlOptions,
+) -> Result<EngineOptions, gst::ErrorMessage> {
+    let provider = match execution_provider {
+        ExecutionProvider::Cpu => Provider::Cpu,
+        #[cfg(feature = "coreml")]
+        ExecutionProvider::Coreml => Provider::Coreml,
+    };
+    let intra_threads = intra_threads
+        .map(|value| {
+            usize::try_from(value).map_err(|_error| {
+                gst::error_msg!(
+                    gst::LibraryError::Settings,
+                    ["intra-op-threads does not fit the platform usize"]
+                )
+            })
+        })
+        .transpose()?;
+    let optimization = match optimization {
+        GraphOptimization::Disable => ort::session::builder::GraphOptimizationLevel::Disable,
+        GraphOptimization::Level1 => ort::session::builder::GraphOptimizationLevel::Level1,
+        GraphOptimization::Level2 => ort::session::builder::GraphOptimizationLevel::Level2,
+        GraphOptimization::Level3 => ort::session::builder::GraphOptimizationLevel::Level3,
+        GraphOptimization::All => ort::session::builder::GraphOptimizationLevel::All,
+    };
+    EngineOptions {
+        provider,
+        intra_threads,
+        optimization,
+        strict_execution_provider,
+        #[cfg(feature = "coreml")]
+        coreml,
+    }
+    .validate()
+    .map_err(|error| gst::error_msg!(gst::LibraryError::Settings, ["{error}"]))
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, glib::Enum, PartialEq)]
+#[repr(i32)]
+#[enum_type(name = "GstSmithOrtInputMode")]
+pub enum InputMode {
+    #[default]
+    #[enum_value(name = "Video", nick = "video")]
+    Video = 0,
+    #[enum_value(name = "Tensor metadata", nick = "tensor-meta")]
+    TensorMeta = 1,
+}
+
 #[derive(Default)]
 struct Settings {
+    input_mode: InputMode,
     model_file: Option<PathBuf>,
     model_info_file: Option<PathBuf>,
     execution_provider: ExecutionProvider,
@@ -66,7 +120,24 @@ struct Settings {
     coreml: crate::coreml::CoreMlOptions,
 }
 
-struct State {
+enum State {
+    Video(Box<VideoState>),
+    TensorMeta {
+        engine: Box<dyn gst_inference_common::engine::TensorEngine>,
+        info: TensorModelInfo,
+    },
+}
+
+impl State {
+    fn caps_contract(&self) -> CapsContract<'_> {
+        match self {
+            Self::Video(state) => state.info.caps_contract(),
+            Self::TensorMeta { info, .. } => info.caps_contract(),
+        }
+    }
+}
+
+struct VideoState {
     engine: Box<dyn gst_inference_common::engine::Engine>,
     info: ModelInfo,
     video_info: Option<gst_video::VideoInfo>,
@@ -90,6 +161,12 @@ impl ObjectImpl for OrtInference {
     fn properties() -> &'static [glib::ParamSpec] {
         static PROPERTIES: LazyLock<Vec<glib::ParamSpec>> = LazyLock::new(|| {
             let properties = vec![
+                glib::ParamSpecEnum::builder::<InputMode>("input-mode")
+                    .nick("Input Mode")
+                    .blurb("Preprocess video pixels or consume tensors from upstream GstTensorMeta")
+                    .default_value(InputMode::Video)
+                    .mutable_ready()
+                    .build(),
                 glib::ParamSpecString::builder("model-file")
                     .nick("Model File")
                     .blurb("ONNX model file")
@@ -146,6 +223,11 @@ impl ObjectImpl for OrtInference {
             return;
         };
         match pspec.name() {
+            "input-mode" => {
+                if let Ok(mode) = value.get::<InputMode>() {
+                    settings.input_mode = mode;
+                }
+            }
             "model-file" => {
                 if let Ok(path) = value.get::<Option<String>>() {
                     settings.model_file = path.map(PathBuf::from);
@@ -196,6 +278,7 @@ impl ObjectImpl for OrtInference {
             return None::<String>.to_value();
         };
         match pspec.name() {
+            "input-mode" => settings.input_mode.to_value(),
             "model-file" => settings
                 .model_file
                 .as_ref()
@@ -229,8 +312,8 @@ impl ElementImpl for OrtInference {
         static METADATA: LazyLock<gst::subclass::ElementMetadata> = LazyLock::new(|| {
             gst::subclass::ElementMetadata::new(
                 "ONNX Runtime Inference",
-                "Filter/Analysis/Video",
-                "Runs a model-agnostic ONNX image model and attaches output tensors",
+                "Filter/Analysis",
+                "Runs an ONNX model on video or upstream tensors and attaches output tensors",
                 "Nemanja Zbiljic <nemanja.zbiljic@gmail.com>",
             )
         });
@@ -243,9 +326,9 @@ impl ElementImpl for OrtInference {
     )]
     fn pad_templates() -> &'static [gst::PadTemplate] {
         static TEMPLATES: LazyLock<Vec<gst::PadTemplate>> = LazyLock::new(|| {
-            let caps = gst::Caps::builder("video/x-raw")
-                .field("format", gst::List::new(["RGB", "BGR", "RGBA", "BGRA"]))
-                .build();
+            // Tensor metadata can accompany any media; video mode narrows caps
+            // during negotiation, including before the model is loaded.
+            let caps = gst::Caps::new_any();
             let sink = gst::PadTemplate::new(
                 "sink",
                 gst::PadDirection::Sink,
@@ -279,39 +362,14 @@ impl BaseTransformImpl for OrtInference {
                 ["inference settings lock is poisoned"]
             )
         })?;
-        let provider = match settings.execution_provider {
-            ExecutionProvider::Cpu => Provider::Cpu,
+        let options = engine_options(
+            settings.execution_provider,
+            settings.intra_threads,
+            settings.optimization,
+            settings.strict_execution_provider,
             #[cfg(feature = "coreml")]
-            ExecutionProvider::Coreml => Provider::Coreml,
-        };
-        let threads = settings
-            .intra_threads
-            .map(|value| {
-                usize::try_from(value).map_err(|_error| {
-                    gst::error_msg!(
-                        gst::LibraryError::Settings,
-                        ["intra-op-threads does not fit the platform usize"]
-                    )
-                })
-            })
-            .transpose()?;
-        let optimization = match settings.optimization {
-            GraphOptimization::Disable => ort::session::builder::GraphOptimizationLevel::Disable,
-            GraphOptimization::Level1 => ort::session::builder::GraphOptimizationLevel::Level1,
-            GraphOptimization::Level2 => ort::session::builder::GraphOptimizationLevel::Level2,
-            GraphOptimization::Level3 => ort::session::builder::GraphOptimizationLevel::Level3,
-            GraphOptimization::All => ort::session::builder::GraphOptimizationLevel::All,
-        };
-        let options = EngineOptions {
-            provider,
-            intra_threads: threads,
-            optimization,
-            strict_execution_provider: settings.strict_execution_provider,
-            #[cfg(feature = "coreml")]
-            coreml: settings.coreml.clone(),
-        }
-        .validate()
-        .map_err(|error| gst::error_msg!(gst::LibraryError::Settings, ["{error}"]))?;
+            settings.coreml.clone(),
+        )?;
         let model_file = settings.model_file.clone().ok_or_else(|| {
             gst::error_msg!(
                 gst::LibraryError::Settings,
@@ -331,17 +389,13 @@ impl BaseTransformImpl for OrtInference {
                 ]
             )
         })?;
-        let info = ModelInfo::parse(&contents).map_err(|error| {
+        let invalid_info = |error| {
             gst::error_msg!(
                 gst::LibraryError::Settings,
                 ["invalid model-info file {}: {error}", info_file.display()]
             )
-        })?;
-        let channel_order = match settings.model_channel_order {
-            ModelChannelOrder::Rgb => ChannelOrder::Rgb,
-            ModelChannelOrder::Bgr => ChannelOrder::Bgr,
         };
-        let engine = OrtEngine::load(&model_file, &info, options).map_err(|error| {
+        let initialization_error = |error| {
             gst::error_msg!(
                 gst::LibraryError::Settings,
                 [
@@ -349,7 +403,33 @@ impl BaseTransformImpl for OrtInference {
                     model_file.display()
                 ]
             )
-        })?;
+        };
+        let loaded = match settings.input_mode {
+            InputMode::Video => {
+                let info = ModelInfo::parse(&contents).map_err(invalid_info)?;
+                let channel_order = match settings.model_channel_order {
+                    ModelChannelOrder::Rgb => ChannelOrder::Rgb,
+                    ModelChannelOrder::Bgr => ChannelOrder::Bgr,
+                };
+                let engine =
+                    OrtEngine::load(&model_file, &info, options).map_err(initialization_error)?;
+                State::Video(Box::new(VideoState {
+                    engine: Box::new(engine),
+                    info,
+                    video_info: None,
+                    channel_order,
+                }))
+            }
+            InputMode::TensorMeta => {
+                let info = TensorModelInfo::parse(&contents).map_err(invalid_info)?;
+                let engine = crate::engine::OrtTensorEngine::load(&model_file, &info, options)
+                    .map_err(initialization_error)?;
+                State::TensorMeta {
+                    engine: Box::new(engine),
+                    info,
+                }
+            }
+        };
         drop(settings);
         let mut state = self.state.lock().map_err(|_error| {
             gst::error_msg!(
@@ -357,12 +437,7 @@ impl BaseTransformImpl for OrtInference {
                 ["inference state lock is poisoned"]
             )
         })?;
-        *state = Some(State {
-            engine: Box::new(engine),
-            info,
-            video_info: None,
-            channel_order,
-        });
+        *state = Some(loaded);
         Ok(())
     }
 
@@ -378,15 +453,6 @@ impl BaseTransformImpl for OrtInference {
     }
 
     fn set_caps(&self, incaps: &gst::Caps, outcaps: &gst::Caps) -> Result<(), gst::LoggableError> {
-        let video_info = gst_video::VideoInfo::from_caps(incaps)
-            .map_err(|_error| gst::loggable_error!(CAT, "invalid video caps {incaps:?}"))?;
-        if pixel_format(video_info.format()).is_none() {
-            return Err(gst::loggable_error!(
-                CAT,
-                "unsupported negotiated video format {:?}",
-                video_info.format()
-            ));
-        }
         let mut state = self
             .state
             .lock()
@@ -394,21 +460,32 @@ impl BaseTransformImpl for OrtInference {
         let Some(state) = state.as_mut() else {
             return Err(gst::loggable_error!(CAT, "inference engine is not started"));
         };
-        let expected = state.info.image_dimensions().map_err(|error| {
-            gst::loggable_error!(CAT, "invalid model input dimensions: {error}")
-        })?;
-        let actual = (video_info.width() as usize, video_info.height() as usize);
-        if actual != expected {
-            return Err(gst::loggable_error!(
-                CAT,
-                "negotiated video size {}x{} does not match model input {}x{}",
-                actual.0,
-                actual.1,
-                expected.0,
-                expected.1
-            ));
+        if let State::Video(state) = state {
+            let video_info = gst_video::VideoInfo::from_caps(incaps)
+                .map_err(|_error| gst::loggable_error!(CAT, "invalid video caps {incaps:?}"))?;
+            if pixel_format(video_info.format()).is_none() {
+                return Err(gst::loggable_error!(
+                    CAT,
+                    "unsupported negotiated video format {:?}",
+                    video_info.format()
+                ));
+            }
+            let expected = state.info.image_dimensions().map_err(|error| {
+                gst::loggable_error!(CAT, "invalid model input dimensions: {error}")
+            })?;
+            let actual = (video_info.width() as usize, video_info.height() as usize);
+            if actual != expected {
+                return Err(gst::loggable_error!(
+                    CAT,
+                    "negotiated video size {}x{} does not match model input {}x{}",
+                    actual.0,
+                    actual.1,
+                    expected.0,
+                    expected.1
+                ));
+            }
+            state.video_info = Some(video_info);
         }
-        state.video_info = Some(video_info);
         self.parent_set_caps(incaps, outcaps)
     }
 
@@ -418,12 +495,21 @@ impl BaseTransformImpl for OrtInference {
         caps: &gst::Caps,
         filter: Option<&gst::Caps>,
     ) -> Option<gst::Caps> {
+        let input_mode = self.settings.lock().ok()?.input_mode;
+        let caps = match input_mode {
+            InputMode::Video => caps.intersect(
+                &gst::Caps::builder("video/x-raw")
+                    .field("format", gst::List::new(["RGB", "BGR", "RGBA", "BGRA"]))
+                    .build(),
+            ),
+            InputMode::TensorMeta => caps.clone(),
+        };
         let state = self.state.lock().ok();
         let info = state
             .as_deref()
             .and_then(Option::as_ref)
-            .map(|state| state.info.caps_contract());
-        Some(tensor::transform_caps(info, direction, caps, filter))
+            .map(State::caps_contract);
+        Some(tensor::transform_caps(info, direction, &caps, filter))
     }
 
     fn fixate_caps(
@@ -436,7 +522,7 @@ impl BaseTransformImpl for OrtInference {
         let info = state
             .as_deref()
             .and_then(Option::as_ref)
-            .map(|state| state.info.caps_contract());
+            .map(State::caps_contract);
         tensor::fixate_caps(info, direction, caps, othercaps)
     }
 
@@ -447,6 +533,33 @@ impl BaseTransformImpl for OrtInference {
         let state = self.state.lock().map_err(|_error| gst::FlowError::Error)?;
         let Some(state) = state.as_ref() else {
             return Err(gst::FlowError::Flushing);
+        };
+        let state = match state {
+            State::Video(state) => state,
+            State::TensorMeta { engine, info } => {
+                let inputs = match tensor::collect_inputs(buffer, info) {
+                    Ok(Some(inputs)) => inputs,
+                    Ok(None) => return Ok(gst::FlowSuccess::Ok),
+                    Err(error) => {
+                        gst::element_imp_error!(
+                            self,
+                            gst::StreamError::Format,
+                            ["invalid model inputs: {error}"]
+                        );
+                        return Err(gst::FlowError::Error);
+                    }
+                };
+                let outputs = engine.run(&inputs).map_err(|error| {
+                    gst::element_imp_error!(
+                        self,
+                        gst::StreamError::Failed,
+                        ["ONNX Runtime inference failed: {error}"]
+                    );
+                    gst::FlowError::Error
+                })?;
+                tensor::attach_tensors(buffer, outputs);
+                return Ok(gst::FlowSuccess::Ok);
+            }
         };
         let info = state
             .video_info

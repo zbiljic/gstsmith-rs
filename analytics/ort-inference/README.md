@@ -1,9 +1,29 @@
 # ORT inference
 
 `gst-plugin-ort-inference` provides the `ortinference` GStreamer element. It
-uses ONNX Runtime and publishes every model output in model-info order through
-the shared `tensor/strided` caps and `GstTensorMeta` contract. Video buffers
-pass through unchanged.
+uses ONNX Runtime and publishes the model outputs model-info declares, in
+model-info order, through the shared `tensor/strided` caps and `GstTensorMeta`
+contract. Carrier buffers pass through unchanged. The shared
+[model-info contract](../inference-common/README.md#model-info-contract) covers
+output subsets and dimensions that bind the model's dynamic dimensions.
+
+`input-mode=video` is the default. Set `input-mode=tensor-meta` to consume
+one or more tensors prepared upstream in `GstTensorMeta`, with the
+[shared tensor-input contract](../inference-common/README.md#tensor-input-inference).
+The producer can be a preprocessor, a custom source, or another inference
+element. Each model input selects a tensor by its model-info `id`, independently
+of tensor order or the metadata instance containing it. The carrier buffer and
+existing tensors are preserved; outputs are appended as a new `GstTensorMeta`.
+
+Set `input-mode` in NULL or READY. Provider and session properties apply to
+both modes; `model-channel-order` affects only video mode. Input mode is
+explicit: existing tensor metadata never changes how video mode processes
+pixels. Tensor mode does not read the carrier's payload as model input.
+
+For primary/secondary model chaining, use two `ortinference` instances with
+the secondary in `input-mode=tensor-meta`; map its input IDs to the primary's
+output IDs. Use distinct output IDs and group IDs for each stage. See
+[selection and per-object limitations](../inference-common/README.md#tensor-input-inference).
 
 `model-channel-order=rgb` is the READY-mutable default. Set
 `model-channel-order=bgr` for a model that expects BGR channel order. The

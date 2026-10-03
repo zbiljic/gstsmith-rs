@@ -36,9 +36,9 @@ and elements written in Rust.
       as `GstTensorMeta`.
   - [`ort-inference`](analytics/ort-inference/): Model-agnostic ONNX tensor
     inference using ONNX Runtime.
-    - `ortinference`: Run the same model-info contract with ORT's CPU provider
-      (or the optional CoreML provider) and attach raw output tensors as
-      `GstTensorMeta`.
+    - `ortinference`: Run the same video or tensor-meta input contract with
+      ORT's CPU provider (or the optional CoreML provider) and attach raw
+      output tensors as `GstTensorMeta`.
 
 - [`net`](net/)
 
