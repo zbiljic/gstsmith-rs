@@ -31,8 +31,9 @@ and elements written in Rust.
       analytics metadata.
   - [`tract-inference`](analytics/tract-inference/): Model-agnostic ONNX tensor
     inference using Tract.
-    - `tractinference`: Run a static single-image ONNX model with Tract and
-      attach its raw output tensors as `GstTensorMeta`.
+    - `tractinference`: Run an ONNX model on video or selected upstream
+      tensors (`input-mode=tensor-meta`) with Tract and attach output tensors
+      as `GstTensorMeta`.
   - [`ort-inference`](analytics/ort-inference/): Model-agnostic ONNX tensor
     inference using ONNX Runtime.
     - `ortinference`: Run the same model-info contract with ORT's CPU provider

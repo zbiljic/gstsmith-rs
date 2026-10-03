@@ -2,6 +2,7 @@
 
 use gst::glib;
 
+#[cfg(feature = "tract")]
 mod engine;
 mod tractinference;
 

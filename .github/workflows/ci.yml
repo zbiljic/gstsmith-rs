@@ -313,6 +313,10 @@ jobs:
         if: fromJSON(needs.changes.outputs.checks).rust
         run: mise run lint
 
+      - name: Lint Tract without the backend
+        if: fromJSON(needs.changes.outputs.checks).tract
+        run: cargo clippy -p gst-plugin-tract-inference --all-targets --no-default-features -- -D warnings
+
       - name: Check build
         if: fromJSON(needs.changes.outputs.checks).rust
         run: mise run check

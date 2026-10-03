@@ -3,10 +3,16 @@ use std::sync::{LazyLock, Mutex};
 
 use gst::{glib, prelude::*, subclass::prelude::*};
 use gst_base::subclass::prelude::*;
+#[cfg(feature = "tract")]
 use gst_video::prelude::*;
 
+#[cfg(feature = "tract")]
 use crate::engine::Engine;
-use gst_inference_common::model_info::ModelInfo;
+#[cfg(feature = "tract")]
+use crate::engine::tract::{TractEngine, TractTensorEngine};
+#[cfg(feature = "tract")]
+use gst_inference_common::model_info::{CapsContract, ModelInfo, TensorModelInfo};
+#[cfg(feature = "tract")]
 use gst_inference_common::preprocess::{ChannelOrder, PixelFormat, preprocess};
 use gst_inference_common::tensor;
 
@@ -42,15 +48,47 @@ pub enum ModelChannelOrder {
     Bgr = 1,
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, glib::Enum, PartialEq)]
+#[repr(i32)]
+#[enum_type(name = "GstSmithTractInputMode")]
+pub enum InputMode {
+    #[default]
+    #[enum_value(name = "Video", nick = "video")]
+    Video = 0,
+    #[enum_value(name = "Tensor metadata", nick = "tensor-meta")]
+    TensorMeta = 1,
+}
+
 #[derive(Default)]
 struct Settings {
+    input_mode: InputMode,
     model_file: Option<PathBuf>,
     model_info_file: Option<PathBuf>,
     execution_provider: ExecutionProvider,
     model_channel_order: ModelChannelOrder,
 }
 
-struct State {
+#[cfg(feature = "tract")]
+enum State {
+    Video(Box<VideoState>),
+    TensorMeta {
+        engine: Box<dyn gst_inference_common::engine::TensorEngine>,
+        info: TensorModelInfo,
+    },
+}
+
+#[cfg(feature = "tract")]
+impl State {
+    fn caps_contract(&self) -> CapsContract<'_> {
+        match self {
+            Self::Video(state) => state.info.caps_contract(),
+            Self::TensorMeta { info, .. } => info.caps_contract(),
+        }
+    }
+}
+
+#[cfg(feature = "tract")]
+struct VideoState {
     engine: Box<dyn Engine>,
     info: ModelInfo,
     video_info: Option<gst_video::VideoInfo>,
@@ -59,6 +97,7 @@ struct State {
 
 #[derive(Default)]
 pub struct TractInference {
+    #[cfg(feature = "tract")]
     state: Mutex<Option<State>>,
     settings: Mutex<Settings>,
 }
@@ -74,6 +113,12 @@ impl ObjectImpl for TractInference {
     fn properties() -> &'static [glib::ParamSpec] {
         static PROPERTIES: LazyLock<Vec<glib::ParamSpec>> = LazyLock::new(|| {
             vec![
+                glib::ParamSpecEnum::builder::<InputMode>("input-mode")
+                    .nick("Input Mode")
+                    .blurb("Preprocess video pixels or consume tensors from upstream GstTensorMeta")
+                    .default_value(InputMode::Video)
+                    .mutable_ready()
+                    .build(),
                 glib::ParamSpecString::builder("model-file")
                     .nick("Model File")
                     .blurb("ONNX model file")
@@ -106,6 +151,11 @@ impl ObjectImpl for TractInference {
             return;
         };
         match pspec.name() {
+            "input-mode" => {
+                if let Ok(mode) = value.get::<InputMode>() {
+                    settings.input_mode = mode;
+                }
+            }
             "model-file" => {
                 if let Ok(path) = value.get::<Option<String>>() {
                     settings.model_file = path.map(PathBuf::from);
@@ -135,6 +185,7 @@ impl ObjectImpl for TractInference {
             return None::<String>.to_value();
         };
         match pspec.name() {
+            "input-mode" => settings.input_mode.to_value(),
             "model-file" => settings
                 .model_file
                 .as_ref()
@@ -159,8 +210,8 @@ impl ElementImpl for TractInference {
         static METADATA: LazyLock<gst::subclass::ElementMetadata> = LazyLock::new(|| {
             gst::subclass::ElementMetadata::new(
                 "Tract ONNX Inference",
-                "Filter/Analysis/Video",
-                "Runs a model-agnostic ONNX image model and attaches output tensors",
+                "Filter/Analysis",
+                "Runs an ONNX model on video or upstream tensors and attaches output tensors",
                 "Nemanja Zbiljic <nemanja.zbiljic@gmail.com>",
             )
         });
@@ -173,9 +224,9 @@ impl ElementImpl for TractInference {
     )]
     fn pad_templates() -> &'static [gst::PadTemplate] {
         static TEMPLATES: LazyLock<Vec<gst::PadTemplate>> = LazyLock::new(|| {
-            let caps = gst::Caps::builder("video/x-raw")
-                .field("format", gst::List::new(["RGB", "BGR", "RGBA", "BGRA"]))
-                .build();
+            // Tensor metadata can accompany any media; video mode narrows caps
+            // during negotiation, including before the model is loaded.
+            let caps = gst::Caps::new_any();
             let sink = gst::PadTemplate::new(
                 "sink",
                 gst::PadDirection::Sink,
@@ -203,16 +254,13 @@ impl BaseTransformImpl for TractInference {
     const TRANSFORM_IP_ON_PASSTHROUGH: bool = true;
 
     fn start(&self) -> Result<(), gst::ErrorMessage> {
-        let execution_provider = self
-            .settings
-            .lock()
-            .map_err(|_error| {
-                gst::error_msg!(
-                    gst::LibraryError::Settings,
-                    ["inference settings lock is poisoned"]
-                )
-            })?
-            .execution_provider;
+        let settings = self.settings.lock().map_err(|_error| {
+            gst::error_msg!(
+                gst::LibraryError::Settings,
+                ["inference settings lock is poisoned"]
+            )
+        })?;
+        let execution_provider = settings.execution_provider;
         if execution_provider == ExecutionProvider::Metal {
             #[cfg(not(target_os = "macos"))]
             return Err(gst::error_msg!(
@@ -232,12 +280,6 @@ impl BaseTransformImpl for TractInference {
         ));
         #[cfg(feature = "tract")]
         {
-            let settings = self.settings.lock().map_err(|_error| {
-                gst::error_msg!(
-                    gst::LibraryError::Settings,
-                    ["inference settings lock is poisoned"]
-                )
-            })?;
             let model_file = settings.model_file.clone().ok_or_else(|| {
                 gst::error_msg!(
                     gst::LibraryError::Settings,
@@ -257,28 +299,47 @@ impl BaseTransformImpl for TractInference {
                     ]
                 )
             })?;
-            let info = ModelInfo::parse(&contents).map_err(|error| {
+            let invalid_info = |error| {
                 gst::error_msg!(
                     gst::LibraryError::Settings,
                     ["invalid model-info file {}: {error}", info_file.display()]
                 )
-            })?;
-            let channel_order = match settings.model_channel_order {
-                ModelChannelOrder::Rgb => ChannelOrder::Rgb,
-                ModelChannelOrder::Bgr => ChannelOrder::Bgr,
             };
-            let engine: Box<dyn Engine> = Box::new(
-                crate::engine::tract::TractEngine::load(&model_file, &info, execution_provider)
-                    .map_err(|error| {
-                        gst::error_msg!(
-                            gst::LibraryError::Settings,
-                            [
-                                "failed to initialize Tract model {}: {error}",
-                                model_file.display()
-                            ]
-                        )
-                    })?,
-            );
+            let initialization_error = |error| {
+                gst::error_msg!(
+                    gst::LibraryError::Settings,
+                    [
+                        "failed to initialize Tract model {}: {error}",
+                        model_file.display()
+                    ]
+                )
+            };
+            let loaded = match settings.input_mode {
+                InputMode::Video => {
+                    let info = ModelInfo::parse(&contents).map_err(invalid_info)?;
+                    let channel_order = match settings.model_channel_order {
+                        ModelChannelOrder::Rgb => ChannelOrder::Rgb,
+                        ModelChannelOrder::Bgr => ChannelOrder::Bgr,
+                    };
+                    let engine = TractEngine::load(&model_file, &info, execution_provider)
+                        .map_err(initialization_error)?;
+                    State::Video(Box::new(VideoState {
+                        engine: Box::new(engine),
+                        info,
+                        video_info: None,
+                        channel_order,
+                    }))
+                }
+                InputMode::TensorMeta => {
+                    let info = TensorModelInfo::parse(&contents).map_err(invalid_info)?;
+                    let engine = TractTensorEngine::load(&model_file, &info, execution_provider)
+                        .map_err(initialization_error)?;
+                    State::TensorMeta {
+                        engine: Box::new(engine),
+                        info,
+                    }
+                }
+            };
             drop(settings);
             let mut state = self.state.lock().map_err(|_error| {
                 gst::error_msg!(
@@ -286,16 +347,12 @@ impl BaseTransformImpl for TractInference {
                     ["inference state lock is poisoned"]
                 )
             })?;
-            *state = Some(State {
-                engine,
-                info,
-                video_info: None,
-                channel_order,
-            });
+            *state = Some(loaded);
             Ok(())
         }
     }
 
+    #[cfg(feature = "tract")]
     fn stop(&self) -> Result<(), gst::ErrorMessage> {
         let mut state = self.state.lock().map_err(|_error| {
             gst::error_msg!(
@@ -307,24 +364,25 @@ impl BaseTransformImpl for TractInference {
         Ok(())
     }
 
+    #[cfg(feature = "tract")]
     fn set_caps(&self, incaps: &gst::Caps, outcaps: &gst::Caps) -> Result<(), gst::LoggableError> {
-        let video_info = gst_video::VideoInfo::from_caps(incaps)
-            .map_err(|_error| gst::loggable_error!(CAT, "invalid video caps {incaps:?}"))?;
-        if pixel_format(video_info.format()).is_none() {
-            return Err(gst::loggable_error!(
-                CAT,
-                "unsupported negotiated video format {:?}",
-                video_info.format()
-            ));
-        }
-        {
-            let mut state = self
-                .state
-                .lock()
-                .map_err(|_error| gst::loggable_error!(CAT, "inference state lock is poisoned"))?;
-            let Some(state) = state.as_mut() else {
-                return Err(gst::loggable_error!(CAT, "inference engine is not started"));
-            };
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_error| gst::loggable_error!(CAT, "inference state lock is poisoned"))?;
+        let Some(state) = state.as_mut() else {
+            return Err(gst::loggable_error!(CAT, "inference engine is not started"));
+        };
+        if let State::Video(state) = state {
+            let video_info = gst_video::VideoInfo::from_caps(incaps)
+                .map_err(|_error| gst::loggable_error!(CAT, "invalid video caps {incaps:?}"))?;
+            if pixel_format(video_info.format()).is_none() {
+                return Err(gst::loggable_error!(
+                    CAT,
+                    "unsupported negotiated video format {:?}",
+                    video_info.format()
+                ));
+            }
             let expected = state.info.image_dimensions().map_err(|error| {
                 gst::loggable_error!(CAT, "invalid model input dimensions: {error}")
             })?;
@@ -350,14 +408,28 @@ impl BaseTransformImpl for TractInference {
         caps: &gst::Caps,
         filter: Option<&gst::Caps>,
     ) -> Option<gst::Caps> {
+        let input_mode = self.settings.lock().ok()?.input_mode;
+        let caps = match input_mode {
+            InputMode::Video => caps.intersect(
+                &gst::Caps::builder("video/x-raw")
+                    .field("format", gst::List::new(["RGB", "BGR", "RGBA", "BGRA"]))
+                    .build(),
+            ),
+            InputMode::TensorMeta => caps.clone(),
+        };
+        #[cfg(feature = "tract")]
         let state = self.state.lock().ok();
+        #[cfg(feature = "tract")]
         let info = state
             .as_deref()
             .and_then(Option::as_ref)
-            .map(|state| state.info.caps_contract());
-        Some(tensor::transform_caps(info, direction, caps, filter))
+            .map(State::caps_contract);
+        #[cfg(not(feature = "tract"))]
+        let info = None;
+        Some(tensor::transform_caps(info, direction, &caps, filter))
     }
 
+    #[cfg(feature = "tract")]
     fn fixate_caps(
         &self,
         direction: gst::PadDirection,
@@ -368,10 +440,11 @@ impl BaseTransformImpl for TractInference {
         let info = state
             .as_deref()
             .and_then(Option::as_ref)
-            .map(|state| state.info.caps_contract());
+            .map(State::caps_contract);
         tensor::fixate_caps(info, direction, caps, othercaps)
     }
 
+    #[cfg(feature = "tract")]
     fn transform_ip(
         &self,
         buffer: &mut gst::BufferRef,
@@ -379,6 +452,33 @@ impl BaseTransformImpl for TractInference {
         let state = self.state.lock().map_err(|_error| gst::FlowError::Error)?;
         let Some(state) = state.as_ref() else {
             return Err(gst::FlowError::Flushing);
+        };
+        let state = match state {
+            State::Video(state) => state,
+            State::TensorMeta { engine, info } => {
+                let inputs = match tensor::collect_inputs(buffer, info) {
+                    Ok(Some(inputs)) => inputs,
+                    Ok(None) => return Ok(gst::FlowSuccess::Ok),
+                    Err(error) => {
+                        gst::element_imp_error!(
+                            self,
+                            gst::StreamError::Format,
+                            ["invalid model inputs: {error}"]
+                        );
+                        return Err(gst::FlowError::Error);
+                    }
+                };
+                let outputs = engine.run(&inputs).map_err(|error| {
+                    gst::element_imp_error!(
+                        self,
+                        gst::StreamError::Failed,
+                        ["Tract inference failed: {error}"]
+                    );
+                    gst::FlowError::Error
+                })?;
+                tensor::attach_tensors(buffer, outputs);
+                return Ok(gst::FlowSuccess::Ok);
+            }
         };
         let info = state
             .video_info
@@ -446,6 +546,7 @@ impl BaseTransformImpl for TractInference {
     }
 }
 
+#[cfg(feature = "tract")]
 fn pixel_format(format: gst_video::VideoFormat) -> Option<PixelFormat> {
     match format {
         gst_video::VideoFormat::Rgb => Some(PixelFormat::Rgb),
@@ -456,7 +557,7 @@ fn pixel_format(format: gst_video::VideoFormat) -> Option<PixelFormat> {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "tract"))]
 mod tests {
     use std::fs;
 
