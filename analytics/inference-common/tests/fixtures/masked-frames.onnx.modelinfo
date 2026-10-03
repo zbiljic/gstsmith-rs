@@ -1,0 +1,16 @@
+[modelinfo]
+version=1.0
+group-id=gstsmith-masked-frames-fixture
+
+[x]
+id=image
+type=float32
+dims=1,1,1,2,3
+dir=input
+ranges=0.0,255.0
+
+[y]
+id=masked
+type=float32
+dims=1,1,1,2,3
+dir=output

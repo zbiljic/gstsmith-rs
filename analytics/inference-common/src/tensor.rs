@@ -2,7 +2,7 @@ use gst::glib;
 use gst::prelude::*;
 
 use crate::engine::OwnedTensor;
-use crate::model_info::{DimOrder, ModelInfo, ScalarType, TensorDescription};
+use crate::model_info::{CapsContract, DimOrder, ScalarType, TensorDescription, TensorModelInfo};
 
 #[expect(
     clippy::cast_possible_truncation,
@@ -74,30 +74,30 @@ pub fn tensor_data_type(data_type: ScalarType) -> gst_analytics::TensorDataType 
 )]
 #[must_use]
 pub fn transform_caps(
-    info: Option<&ModelInfo>,
+    contract: Option<CapsContract<'_>>,
     direction: gst::PadDirection,
     caps: &gst::Caps,
     filter: Option<&gst::Caps>,
 ) -> gst::Caps {
     let mut result = caps.copy();
     for structure in result.make_mut().iter_mut() {
-        if let Some((width, height)) = info.and_then(|info| info.image_dimensions().ok()) {
+        if let Some((width, height)) = contract.and_then(|contract| contract.image) {
             structure.set("width", width as i32);
             structure.set("height", height as i32);
         }
         if direction == gst::PadDirection::Src {
             structure.remove_field("tensors");
-        } else if let Some(info) = info {
+        } else if let Some(contract) = contract {
             let mut groups = structure
                 .get::<gst::Structure>("tensors")
                 .unwrap_or_else(|_| gst::Structure::new_empty("tensorgroups"));
             // Sink caps cannot already contain this element's output group. If
             // they do, the tensor groups came from downstream query feedback.
-            if groups.has_field(info.group_id()) {
+            if groups.has_field(contract.group_id) {
                 groups = gst::Structure::new_empty("tensorgroups");
             }
-            let descriptors = info.outputs().iter().map(tensor_caps).collect::<Vec<_>>();
-            groups.set(info.group_id(), gst::UniqueList::new(descriptors));
+            let descriptors = contract.outputs.iter().map(tensor_caps).collect::<Vec<_>>();
+            groups.set(contract.group_id, gst::UniqueList::new(descriptors));
             structure.set("tensors", groups);
         }
     }
@@ -108,16 +108,16 @@ pub fn transform_caps(
 
 #[must_use]
 pub fn fixate_caps(
-    info: Option<&ModelInfo>,
+    contract: Option<CapsContract<'_>>,
     direction: gst::PadDirection,
     caps: &gst::Caps,
     mut othercaps: gst::Caps,
 ) -> gst::Caps {
-    if direction == gst::PadDirection::Sink && info.is_some() {
+    if direction == gst::PadDirection::Sink && contract.is_some() {
         // BaseTransform intersects peer alternatives before fixation. Nested
         // tensor structures can thereby accumulate unrelated decoder groups;
         // retain only candidates matching the groups this transform produces.
-        let authoritative = transform_caps(info, direction, caps, None);
+        let authoritative = transform_caps(contract, direction, caps, None);
         let rejected = othercaps
             .iter()
             .enumerate()
@@ -136,6 +136,108 @@ pub fn fixate_caps(
     othercaps
 }
 
+/// The inputs of `info`, read by tensor id from the
+/// `GstTensorMeta`s on `buffer`: `None` when no input is present, an error
+/// when only some are, when a required id is ambiguous, or when one does
+/// not match its model-info exactly.
+pub fn collect_inputs(
+    buffer: &gst::BufferRef,
+    info: &TensorModelInfo,
+) -> Result<Option<Vec<OwnedTensor>>, String> {
+    let tensors = buffer
+        .iter_meta::<gst_analytics::TensorMeta>()
+        .flat_map(|meta| meta.as_slice().to_vec())
+        .collect::<Vec<_>>();
+    let found = info
+        .inputs()
+        .iter()
+        .map(|description| {
+            let id = glib::Quark::from_str(&description.id);
+            let mut matches = tensors.iter().filter(|tensor| tensor.id() == id);
+            let found = matches.next();
+            if matches.next().is_some() {
+                return Err(format!(
+                    "ambiguous model input {}: duplicate tensor id",
+                    description.id
+                ));
+            }
+            Ok(found.map(|tensor| (description, tensor)))
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+    if found.iter().all(Option::is_none) {
+        return Ok(None);
+    }
+    let missing = found
+        .iter()
+        .zip(info.inputs())
+        .filter(|(found, _)| found.is_none())
+        .map(|(_, description)| description.id.as_str())
+        .collect::<Vec<_>>();
+    if !missing.is_empty() {
+        return Err(format!(
+            "buffer carries only some model inputs; missing {}",
+            missing.join(", ")
+        ));
+    }
+    found
+        .into_iter()
+        .flatten()
+        .map(|(description, tensor)| read_input(description, tensor))
+        .collect::<Result<Vec<_>, _>>()
+        .map(Some)
+}
+
+fn read_input(
+    description: &TensorDescription,
+    tensor: &gst_analytics::Tensor,
+) -> Result<OwnedTensor, String> {
+    let id = &description.id;
+    let expected_type = tensor_data_type(description.data_type);
+    if tensor.data_type() != expected_type {
+        return Err(format!(
+            "input {id} type mismatch: tensor {:?}, model-info {expected_type:?}",
+            tensor.data_type()
+        ));
+    }
+    if tensor.dims() != description.dims.as_slice() {
+        return Err(format!(
+            "input {id} dimensions mismatch: tensor {:?}, model-info {:?}",
+            tensor.dims(),
+            description.dims
+        ));
+    }
+    let expected_order = match description.dim_order {
+        DimOrder::RowMajor => gst_analytics::TensorDimOrder::RowMajor,
+        DimOrder::ColMajor => gst_analytics::TensorDimOrder::ColMajor,
+    };
+    if tensor.dims_order() != expected_order {
+        return Err(format!(
+            "input {id} dimension order mismatch: tensor {:?}, model-info {expected_order:?}",
+            tensor.dims_order()
+        ));
+    }
+    let size = description
+        .dims
+        .iter()
+        .product::<usize>()
+        .checked_mul(description.data_type.size())
+        .ok_or_else(|| format!("input {id} size overflows"))?;
+    let map = tensor
+        .data()
+        .map_readable()
+        .map_err(|error| format!("mapping input {id}: {error}"))?;
+    if map.len() != size {
+        return Err(format!(
+            "input {id} holds {} bytes; model-info requires {size}",
+            map.len()
+        ));
+    }
+    Ok(OwnedTensor {
+        description: description.clone(),
+        bytes: map.as_slice().to_vec(),
+    })
+}
+
 fn same_tensor_groups(left: &gst::StructureRef, right: &gst::StructureRef) -> bool {
     match (
         left.get::<gst::Structure>("tensors"),
@@ -152,6 +254,7 @@ fn same_tensor_groups(left: &gst::StructureRef, right: &gst::StructureRef) -> bo
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::model_info::ModelInfo;
 
     const MODEL_INFO: &str = include_str!("../tests/fixtures/identity.onnx.modelinfo");
 
@@ -196,7 +299,7 @@ mod tests {
             .field("format", "RGB")
             .build();
         let reverse = transform_caps(
-            Some(&info),
+            Some(info.caps_contract()),
             gst::PadDirection::Src,
             &downstream,
             Some(&media_filter),
@@ -223,7 +326,7 @@ mod tests {
             .build();
         let decoder_filter = decoder_filter(&info);
         let selected = fixate_caps(
-            Some(&info),
+            Some(info.caps_contract()),
             gst::PadDirection::Sink,
             &plain_sink,
             decoder_filter,
@@ -258,7 +361,12 @@ mod tests {
             .field("format", "RGB")
             .field("tensors", genuine_groups)
             .build();
-        let composed = transform_caps(Some(&info), gst::PadDirection::Sink, &genuine_sink, None);
+        let composed = transform_caps(
+            Some(info.caps_contract()),
+            gst::PadDirection::Sink,
+            &genuine_sink,
+            None,
+        );
         let groups = composed
             .structure(0)
             .expect("composed structure")
@@ -280,7 +388,12 @@ mod tests {
             .field("format", "RGB")
             .field("tensors", decoder_groups(&info))
             .build();
-        let cleaned = transform_caps(Some(&info), gst::PadDirection::Sink, &polluted_sink, None);
+        let cleaned = transform_caps(
+            Some(info.caps_contract()),
+            gst::PadDirection::Sink,
+            &polluted_sink,
+            None,
+        );
         let cleaned_groups = cleaned
             .structure(0)
             .expect("cleaned structure")
@@ -309,7 +422,7 @@ mod tests {
                     .build(),
             );
         let selected = fixate_caps(
-            Some(&info),
+            Some(info.caps_contract()),
             gst::PadDirection::Sink,
             &genuine_sink,
             candidates,

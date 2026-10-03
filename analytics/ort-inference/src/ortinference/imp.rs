@@ -422,7 +422,7 @@ impl BaseTransformImpl for OrtInference {
         let info = state
             .as_deref()
             .and_then(Option::as_ref)
-            .map(|state| &state.info);
+            .map(|state| state.info.caps_contract());
         Some(tensor::transform_caps(info, direction, caps, filter))
     }
 
@@ -436,7 +436,7 @@ impl BaseTransformImpl for OrtInference {
         let info = state
             .as_deref()
             .and_then(Option::as_ref)
-            .map(|state| &state.info);
+            .map(|state| state.info.caps_contract());
         tensor::fixate_caps(info, direction, caps, othercaps)
     }
 

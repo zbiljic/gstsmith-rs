@@ -1,5 +1,5 @@
 use crate::engine::InputTensor;
-use crate::model_info::{ScalarType, TensorDescription};
+use crate::model_info::{ScalarType, TensorDescription, image_layout};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PixelFormat {
@@ -74,18 +74,15 @@ pub fn preprocess(
     if source.len() < source_len {
         return Err("mapped video frame is shorter than its declared stride".to_owned());
     }
-    let channels_first = input.dims.get(1) == Some(&3);
-    let expected = if channels_first {
-        [1, 3, height, width]
-    } else {
-        [1, height, width, 3]
-    };
-    if input.dims != expected {
-        return Err(format!(
-            "video dimensions {width}x{height} do not match model input {:?}",
-            input.dims
-        ));
-    }
+    let layout = image_layout(&input.dims)
+        .filter(|layout| layout.width == width && layout.height == height)
+        .ok_or_else(|| {
+            format!(
+                "video dimensions {width}x{height} do not match model input {:?}",
+                input.dims
+            )
+        })?;
+    let channels_first = layout.channels_first;
     let values = width
         .checked_mul(height)
         .and_then(|size| size.checked_mul(3))
