@@ -70,6 +70,8 @@ jobs:
 
       - name: Cache Rust dependencies
         uses: Swatinem/rust-cache@v2
+        with:
+          cache-targets: false
 
       - name: Test Metal provider
         run: cargo test -p gst-plugin-tract-inference --all-targets --features metal -- --nocapture
@@ -115,6 +117,8 @@ jobs:
 
       - name: Cache Rust dependencies
         uses: Swatinem/rust-cache@v2
+        with:
+          cache-targets: false
 
       - name: Test CoreML provider
         run: cargo test -p gst-plugin-ort-inference --all-targets --features coreml -- --nocapture
