@@ -28,12 +28,14 @@ impl Provider {
 }
 
 /// Configuration applied while constructing one ORT session.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub struct EngineOptions {
     pub provider: Provider,
     pub intra_threads: Option<usize>,
     pub optimization: GraphOptimizationLevel,
     pub strict_execution_provider: bool,
+    #[cfg(feature = "coreml")]
+    pub coreml: crate::coreml::CoreMlOptions,
 }
 
 impl EngineOptions {
@@ -82,7 +84,7 @@ impl OrtEngine {
             }
             #[cfg(feature = "coreml")]
             Provider::Coreml => {
-                let coreml = ort::ep::CoreML::default();
+                let coreml = options.coreml.execution_provider();
                 let available = coreml.is_available().map_err(|error| {
                     format!("failed to query CoreML execution provider: {error}")
                 })?;

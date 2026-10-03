@@ -2,6 +2,8 @@
 
 use gst::glib;
 
+#[cfg(feature = "coreml")]
+mod coreml;
 mod engine;
 mod ortinference;
 

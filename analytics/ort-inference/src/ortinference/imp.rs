@@ -62,6 +62,8 @@ struct Settings {
     optimization: GraphOptimization,
     strict_execution_provider: bool,
     model_channel_order: ModelChannelOrder,
+    #[cfg(feature = "coreml")]
+    coreml: crate::coreml::CoreMlOptions,
 }
 
 struct State {
@@ -87,7 +89,7 @@ impl ObjectSubclass for OrtInference {
 impl ObjectImpl for OrtInference {
     fn properties() -> &'static [glib::ParamSpec] {
         static PROPERTIES: LazyLock<Vec<glib::ParamSpec>> = LazyLock::new(|| {
-            vec![
+            let properties = vec![
                 glib::ParamSpecString::builder("model-file")
                     .nick("Model File")
                     .blurb("ONNX model file")
@@ -128,7 +130,13 @@ impl ObjectImpl for OrtInference {
                     .default_value(ModelChannelOrder::Rgb)
                     .mutable_ready()
                     .build(),
-            ]
+            ];
+            #[cfg(feature = "coreml")]
+            let properties = properties
+                .into_iter()
+                .chain(crate::coreml::CoreMlOptions::properties())
+                .collect();
+            properties
         });
         PROPERTIES.as_ref()
     }
@@ -173,7 +181,13 @@ impl ObjectImpl for OrtInference {
                     settings.model_channel_order = order;
                 }
             }
-            _ => gst::warning!(CAT, imp = self, "unexpected property {}", pspec.name()),
+            _ => {
+                #[cfg(feature = "coreml")]
+                if settings.coreml.set_property(value, pspec) {
+                    return;
+                }
+                gst::warning!(CAT, imp = self, "unexpected property {}", pspec.name());
+            }
         }
     }
 
@@ -197,7 +211,13 @@ impl ObjectImpl for OrtInference {
             "graph-optimization" => settings.optimization.to_value(),
             "strict-execution-provider" => settings.strict_execution_provider.to_value(),
             "model-channel-order" => settings.model_channel_order.to_value(),
-            _ => pspec.default_value().clone(),
+            _ => {
+                #[cfg(feature = "coreml")]
+                if let Some(value) = settings.coreml.property(pspec.name()) {
+                    return value;
+                }
+                pspec.default_value().clone()
+            }
         }
     }
 }
@@ -287,6 +307,8 @@ impl BaseTransformImpl for OrtInference {
             intra_threads: threads,
             optimization,
             strict_execution_provider: settings.strict_execution_provider,
+            #[cfg(feature = "coreml")]
+            coreml: settings.coreml.clone(),
         }
         .validate()
         .map_err(|error| gst::error_msg!(gst::LibraryError::Settings, ["{error}"]))?;

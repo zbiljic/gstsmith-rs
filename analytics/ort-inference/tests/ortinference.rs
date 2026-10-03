@@ -247,9 +247,8 @@ fn bgr_model_order_matches_backends_and_preserves_truthful_rgb_video()
 }
 
 #[cfg(all(feature = "coreml", target_os = "macos"))]
-fn run_coreml_fixture(
-    strict: bool,
-) -> Result<(gst::Buffer, tempfile::TempDir), Box<dyn std::error::Error>> {
+fn coreml_fixture_element() -> Result<(gst::Element, tempfile::TempDir), Box<dyn std::error::Error>>
+{
     init();
     let directory = tempfile::tempdir()?;
     let model = directory.path().join("coreml-conv.onnx");
@@ -264,15 +263,20 @@ fn run_coreml_fixture(
     let element = gst::ElementFactory::make("ortinference")
         .property("model-file", model.to_string_lossy().as_ref())
         .property_from_str("execution-provider", "coreml")
-        .property("strict-execution-provider", strict)
+        .property("strict-execution-provider", true)
         .build()?;
+    Ok((element, directory))
+}
+
+#[cfg(all(feature = "coreml", target_os = "macos"))]
+fn run_coreml_element(element: &gst::Element) -> Result<gst::Buffer, Box<dyn std::error::Error>> {
     let caps = gst::Caps::builder("video/x-raw")
         .field("format", "RGB")
         .field("width", 2_i32)
         .field("height", 2_i32)
         .field("framerate", gst::Fraction::new(1, 1))
         .build();
-    let mut harness = gst_check::Harness::with_element(&element, Some("sink"), Some("src"));
+    let mut harness = gst_check::Harness::with_element(element, Some("sink"), Some("src"));
     harness.set_src_caps(caps.clone());
     harness.play();
     let output = harness.push_and_pull(input_buffer(&caps))?;
@@ -285,7 +289,10 @@ fn run_coreml_fixture(
         .first()
         .ok_or_else(|| std::io::Error::other("CoreML output tensor is missing"))?;
     assert_eq!(tensor.dims(), [1, 1, 2, 2]);
-    Ok((output, directory))
+    for (actual, expected) in tensor_values(tensor).iter().zip([14.5, 32.5, 0.5, 0.5]) {
+        assert!((actual - expected).abs() <= 1.0e-5);
+    }
+    Ok(output)
 }
 
 #[test]
@@ -334,7 +341,29 @@ fn ort_and_tract_factories_have_identical_fixture_contract_and_video_passthrough
 #[cfg(all(feature = "coreml", target_os = "macos"))]
 #[test]
 fn coreml_strict_supported_graph_runs() -> Result<(), Box<dyn std::error::Error>> {
-    let (_output, _directory) = run_coreml_fixture(true)?;
+    let (element, _directory) = coreml_fixture_element()?;
+    let _output = run_coreml_element(&element)?;
+    Ok(())
+}
+
+#[cfg(all(feature = "coreml", target_os = "macos"))]
+#[test]
+fn coreml_mlprogram_runs_with_cache_across_session_restarts()
+-> Result<(), Box<dyn std::error::Error>> {
+    let (element, directory) = coreml_fixture_element()?;
+    let cache = directory.path().join("compiled models");
+    element.set_property_from_str("coreml-model-format", "mlprogram");
+    element.set_property_from_str("coreml-compute-units", "cpu-only");
+    element.set_property("coreml-require-static-input-shapes", true);
+    element.set_property(
+        "coreml-model-cache-directory",
+        cache.to_string_lossy().as_ref(),
+    );
+    element.set_property_from_str("coreml-specialization-strategy", "fast-prediction");
+    for _ in 0..2 {
+        let _output = run_coreml_element(&element)?;
+        assert!(fs::read_dir(&cache)?.next().transpose()?.is_some());
+    }
     Ok(())
 }
 
@@ -442,6 +471,109 @@ fn properties_have_backend_defaults_and_ready_mutability() -> Result<(), Box<dyn
         .ok_or_else(|| std::io::Error::other("model channel order is not an enum"))?;
     assert_eq!(class.value(0).map(gst::glib::EnumValue::nick), Some("rgb"));
     assert_eq!(class.value(1).map(gst::glib::EnumValue::nick), Some("bgr"));
+    Ok(())
+}
+
+#[test]
+fn coreml_properties_follow_feature_availability() -> Result<(), Box<dyn std::error::Error>> {
+    init();
+    let element = gst::ElementFactory::make("ortinference").build()?;
+    for name in [
+        "coreml-model-format",
+        "coreml-compute-units",
+        "coreml-require-static-input-shapes",
+        "coreml-model-cache-directory",
+        "coreml-specialization-strategy",
+        "coreml-profile-compute-plan",
+        "coreml-enable-on-subgraphs",
+        "coreml-allow-low-precision-accumulation-on-gpu",
+    ] {
+        assert_eq!(
+            element.find_property(name).is_some(),
+            cfg!(feature = "coreml")
+        );
+        if let Some(property) = element.find_property(name) {
+            assert!(property.flags().contains(gst::PARAM_FLAG_MUTABLE_READY));
+        }
+    }
+    Ok(())
+}
+
+#[cfg(feature = "coreml")]
+#[test]
+fn coreml_properties_preserve_defaults_and_round_trip() -> Result<(), Box<dyn std::error::Error>> {
+    init();
+    let element = gst::ElementFactory::make("ortinference").build()?;
+    for (property, values) in [
+        ("coreml-model-format", &["neural-network", "mlprogram"][..]),
+        (
+            "coreml-compute-units",
+            &["all", "cpu-only", "cpu-and-gpu", "cpu-and-neural-engine"][..],
+        ),
+        (
+            "coreml-specialization-strategy",
+            &["default", "fast-prediction"][..],
+        ),
+    ] {
+        assert_eq!(
+            Some(enum_nick(&element, property).as_str()),
+            values.first().copied()
+        );
+        for value in values {
+            element.set_property_from_str(property, value);
+            assert_eq!(enum_nick(&element, property), *value);
+        }
+    }
+    for property in [
+        "coreml-require-static-input-shapes",
+        "coreml-profile-compute-plan",
+        "coreml-enable-on-subgraphs",
+        "coreml-allow-low-precision-accumulation-on-gpu",
+    ] {
+        assert!(!element.property::<bool>(property));
+        for value in [true, false] {
+            element.set_property(property, value);
+            assert_eq!(element.property::<bool>(property), value);
+        }
+    }
+    let property = "coreml-model-cache-directory";
+    assert_eq!(element.property::<Option<String>>(property), None);
+    element.set_property(property, "cache with spaces/模型");
+    assert_eq!(
+        element.property::<String>(property),
+        "cache with spaces/模型"
+    );
+    element.set_property(property, "");
+    assert_eq!(element.property::<Option<String>>(property), None);
+    element.set_property(property, "cache");
+    element.set_property(property, None::<String>);
+    assert_eq!(element.property::<Option<String>>(property), None);
+    Ok(())
+}
+
+#[cfg(feature = "coreml")]
+#[test]
+fn cpu_ignores_coreml_options() -> Result<(), Box<dyn std::error::Error>> {
+    let (element, directory) = fixture_element("ortinference")?;
+    let cache = directory.path().join("unused-cache");
+    element.set_property_from_str("coreml-model-format", "mlprogram");
+    element.set_property_from_str("coreml-compute-units", "cpu-and-neural-engine");
+    element.set_property("coreml-require-static-input-shapes", true);
+    element.set_property(
+        "coreml-model-cache-directory",
+        cache.to_string_lossy().as_ref(),
+    );
+    element.set_property_from_str("coreml-specialization-strategy", "fast-prediction");
+    element.set_property("coreml-profile-compute-plan", true);
+    element.set_property("coreml-enable-on-subgraphs", true);
+    element.set_property("coreml-allow-low-precision-accumulation-on-gpu", true);
+    let caps = caps();
+    let mut harness = gst_check::Harness::with_element(&element, Some("sink"), Some("src"));
+    harness.set_src_caps(caps.clone());
+    harness.play();
+    let output = harness.push_and_pull(input_buffer(&caps))?;
+    assert_tensor_contract(&element, &output, &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0])?;
+    assert!(!cache.exists());
     Ok(())
 }
 
