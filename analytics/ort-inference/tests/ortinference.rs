@@ -18,6 +18,10 @@ use gst::prelude::*;
 const MODEL_INFO: &str =
     include_str!("../../inference-common/tests/fixtures/identity.onnx.modelinfo");
 const MODEL: &[u8] = include_bytes!("../../inference-common/tests/fixtures/identity.onnx");
+const MASKED_MODEL_INFO: &str =
+    include_str!("../../inference-common/tests/fixtures/masked-frames.onnx.modelinfo");
+const MASKED_MODEL: &[u8] =
+    include_bytes!("../../inference-common/tests/fixtures/masked-frames.onnx");
 
 // Generated from a minimal ONNX textproto with the repository's Apache-2.0
 // licensed `onnx.proto3` and `protoc --encode=onnx.ModelProto`. A supported
@@ -477,23 +481,27 @@ fn properties_have_backend_defaults_and_ready_mutability() -> Result<(), Box<dyn
 #[test]
 fn coreml_properties_follow_feature_availability() -> Result<(), Box<dyn std::error::Error>> {
     init();
-    let element = gst::ElementFactory::make("ortinference").build()?;
-    for name in [
-        "coreml-model-format",
-        "coreml-compute-units",
-        "coreml-require-static-input-shapes",
-        "coreml-model-cache-directory",
-        "coreml-specialization-strategy",
-        "coreml-profile-compute-plan",
-        "coreml-enable-on-subgraphs",
-        "coreml-allow-low-precision-accumulation-on-gpu",
-    ] {
-        assert_eq!(
-            element.find_property(name).is_some(),
-            cfg!(feature = "coreml")
-        );
-        if let Some(property) = element.find_property(name) {
-            assert!(property.flags().contains(gst::PARAM_FLAG_MUTABLE_READY));
+    for mode in ["video", "tensor-meta"] {
+        let element = gst::ElementFactory::make("ortinference")
+            .property_from_str("input-mode", mode)
+            .build()?;
+        for name in [
+            "coreml-model-format",
+            "coreml-compute-units",
+            "coreml-require-static-input-shapes",
+            "coreml-model-cache-directory",
+            "coreml-specialization-strategy",
+            "coreml-profile-compute-plan",
+            "coreml-enable-on-subgraphs",
+            "coreml-allow-low-precision-accumulation-on-gpu",
+        ] {
+            assert_eq!(
+                element.find_property(name).is_some(),
+                cfg!(feature = "coreml")
+            );
+            if let Some(property) = element.find_property(name) {
+                assert!(property.flags().contains(gst::PARAM_FLAG_MUTABLE_READY));
+            }
         }
     }
     Ok(())
@@ -503,51 +511,55 @@ fn coreml_properties_follow_feature_availability() -> Result<(), Box<dyn std::er
 #[test]
 fn coreml_properties_preserve_defaults_and_round_trip() -> Result<(), Box<dyn std::error::Error>> {
     init();
-    let element = gst::ElementFactory::make("ortinference").build()?;
-    for (property, values) in [
-        ("coreml-model-format", &["neural-network", "mlprogram"][..]),
-        (
-            "coreml-compute-units",
-            &["all", "cpu-only", "cpu-and-gpu", "cpu-and-neural-engine"][..],
-        ),
-        (
-            "coreml-specialization-strategy",
-            &["default", "fast-prediction"][..],
-        ),
-    ] {
+    for mode in ["video", "tensor-meta"] {
+        let element = gst::ElementFactory::make("ortinference")
+            .property_from_str("input-mode", mode)
+            .build()?;
+        for (property, values) in [
+            ("coreml-model-format", &["neural-network", "mlprogram"][..]),
+            (
+                "coreml-compute-units",
+                &["all", "cpu-only", "cpu-and-gpu", "cpu-and-neural-engine"][..],
+            ),
+            (
+                "coreml-specialization-strategy",
+                &["default", "fast-prediction"][..],
+            ),
+        ] {
+            assert_eq!(
+                Some(enum_nick(&element, property).as_str()),
+                values.first().copied()
+            );
+            for value in values {
+                element.set_property_from_str(property, value);
+                assert_eq!(enum_nick(&element, property), *value);
+            }
+        }
+        for property in [
+            "coreml-require-static-input-shapes",
+            "coreml-profile-compute-plan",
+            "coreml-enable-on-subgraphs",
+            "coreml-allow-low-precision-accumulation-on-gpu",
+        ] {
+            assert!(!element.property::<bool>(property));
+            for value in [true, false] {
+                element.set_property(property, value);
+                assert_eq!(element.property::<bool>(property), value);
+            }
+        }
+        let property = "coreml-model-cache-directory";
+        assert_eq!(element.property::<Option<String>>(property), None);
+        element.set_property(property, "cache with spaces/模型");
         assert_eq!(
-            Some(enum_nick(&element, property).as_str()),
-            values.first().copied()
+            element.property::<String>(property),
+            "cache with spaces/模型"
         );
-        for value in values {
-            element.set_property_from_str(property, value);
-            assert_eq!(enum_nick(&element, property), *value);
-        }
+        element.set_property(property, "");
+        assert_eq!(element.property::<Option<String>>(property), None);
+        element.set_property(property, "cache");
+        element.set_property(property, None::<String>);
+        assert_eq!(element.property::<Option<String>>(property), None);
     }
-    for property in [
-        "coreml-require-static-input-shapes",
-        "coreml-profile-compute-plan",
-        "coreml-enable-on-subgraphs",
-        "coreml-allow-low-precision-accumulation-on-gpu",
-    ] {
-        assert!(!element.property::<bool>(property));
-        for value in [true, false] {
-            element.set_property(property, value);
-            assert_eq!(element.property::<bool>(property), value);
-        }
-    }
-    let property = "coreml-model-cache-directory";
-    assert_eq!(element.property::<Option<String>>(property), None);
-    element.set_property(property, "cache with spaces/模型");
-    assert_eq!(
-        element.property::<String>(property),
-        "cache with spaces/模型"
-    );
-    element.set_property(property, "");
-    assert_eq!(element.property::<Option<String>>(property), None);
-    element.set_property(property, "cache");
-    element.set_property(property, None::<String>);
-    assert_eq!(element.property::<Option<String>>(property), None);
     Ok(())
 }
 
@@ -709,4 +721,57 @@ fn benchmark_fixture_backends_reports_preprocessing_inference_and_total()
         drop(directory);
     }
     Ok(())
+}
+
+/// Run the masked-frames fixture (a dynamic `[batch, frames, 1, 2, 3]` image
+/// input, a mask initializer, and an undeclared second output).
+fn run_masked_fixture(factory: &str) -> Vec<(String, Vec<usize>, Vec<f32>)> {
+    init();
+    let directory = tempfile::tempdir().expect("creating fixture directory");
+    let model = directory.path().join("masked-frames.onnx");
+    fs::write(&model, MASKED_MODEL).expect("writing fixture model");
+    fs::write(
+        directory.path().join("masked-frames.onnx.modelinfo"),
+        MASKED_MODEL_INFO,
+    )
+    .expect("writing fixture model-info");
+    let element = gst::ElementFactory::make(factory)
+        .property("model-file", model.to_string_lossy().as_ref())
+        .build()
+        .expect("creating fixture element");
+    let caps = caps();
+    let mut harness = gst_check::Harness::with_element(&element, Some("sink"), Some("src"));
+    harness.set_src_caps(caps.clone());
+    harness.play();
+    let output = harness
+        .push_and_pull(input_buffer(&caps))
+        .expect("running masked-frames fixture");
+    let meta = output
+        .meta::<gst_analytics::TensorMeta>()
+        .expect("tensor metadata attached");
+    meta.as_slice()
+        .iter()
+        .map(|tensor| {
+            (
+                tensor.id().as_str().to_string(),
+                tensor.dims().to_vec(),
+                tensor_values(tensor),
+            )
+        })
+        .collect()
+}
+
+#[test]
+fn model_initializers_and_dynamic_dims_work_with_output_subsets() {
+    for factory in ["ortinference", "tractinference"] {
+        assert_eq!(
+            run_masked_fixture(factory),
+            [(
+                "masked".to_owned(),
+                vec![1, 1, 1, 2, 3],
+                vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0]
+            )],
+            "{factory} with mask=true"
+        );
+    }
 }
