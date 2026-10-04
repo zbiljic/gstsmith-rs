@@ -325,7 +325,10 @@ fn natssrc_emits_caps_timestamps_and_complete_wildcard_envelope() {
         .get::<gst::Array>("headers")
         .expect("metadata headers");
     assert_eq!(metadata_headers.len(), 2);
-    assert!(readable_bytes(&harness.pull().expect("pulling empty source buffer")).is_empty());
+    assert_eq!(
+        readable_bytes(&harness.pull().expect("pulling empty source buffer")),
+        [] as [u8; 0]
+    );
 }
 
 fn meta_buffer(payload: Vec<u8>, subject: &str, reply: &str) -> gst::Buffer {
