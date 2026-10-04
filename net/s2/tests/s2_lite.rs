@@ -269,7 +269,7 @@ fn sink_source_round_trip_durability_metadata_and_command_rejection() {
         )),
         vec![0, 255, 17, 0]
     );
-    assert!(
+    assert_eq!(
         body(&pull_from(
             &lite,
             &basin_name,
@@ -277,8 +277,8 @@ fn sink_source_round_trip_durability_metadata_and_command_rejection() {
             &token,
             "sequence",
             Some(("start-seq-num", 1)),
-        ))
-        .is_empty()
+        )),
+        [] as [u8; 0]
     );
     assert_eq!(
         body(&pull_from(
@@ -291,7 +291,7 @@ fn sink_source_round_trip_durability_metadata_and_command_rejection() {
         )),
         vec![0, 255, 17, 0]
     );
-    assert!(
+    assert_eq!(
         body(&pull_from(
             &lite,
             &basin_name,
@@ -299,8 +299,8 @@ fn sink_source_round_trip_durability_metadata_and_command_rejection() {
             &token,
             "tail-offset",
             Some(("tail-offset", 1)),
-        ))
-        .is_empty()
+        )),
+        [] as [u8; 0]
     );
 
     let command = AppendRecord::from(CommandRecord::fence(
@@ -328,7 +328,7 @@ fn sink_source_round_trip_durability_metadata_and_command_rejection() {
         .pull()
         .expect("pulling command source record");
     assert_eq!(body(&first), vec![0, 255, 17, 0]);
-    assert!(body(&second).is_empty());
+    assert_eq!(body(&second), [] as [u8; 0]);
     let first_meta = gst::meta::CustomMeta::from_buffer(&first, "GstS2RecordMeta")
         .expect("source record metadata");
     assert_eq!(

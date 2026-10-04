@@ -915,7 +915,7 @@ mod tests {
             weak.upgrade().is_none(),
             "cache must not keep the queue alive"
         );
-        assert!(metrics.queue_snapshots().is_empty());
+        assert_eq!(metrics.queue_snapshots(), [] as [QueueSnapshot; 0]);
     }
 
     #[test]

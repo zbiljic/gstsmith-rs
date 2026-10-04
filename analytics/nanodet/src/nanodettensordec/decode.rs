@@ -535,7 +535,10 @@ mod tests {
         if let Some(value) = values.get_mut(164 * CHANNELS + NUM_CLASSES) {
             *value = f32::NAN;
         }
-        assert!(decoded(&values, contract, 0.3, 0.6, 100).is_empty());
+        assert_eq!(
+            decoded(&values, contract, 0.3, 0.6, 100),
+            [] as [Detection; 0]
+        );
     }
 
     #[test]
