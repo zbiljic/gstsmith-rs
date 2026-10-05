@@ -5,7 +5,6 @@ from pathlib import Path
 import onnx
 from onnx import TensorProto, helper
 
-
 ROOT = Path(__file__).resolve().parent
 
 
@@ -38,7 +37,10 @@ save(
     "image-reshape",
     [value("image", [1, 1, 2, 3])],
     [value(name, dims) for name, dims in shapes.items()],
-    [helper.make_node("Reshape", ["image", f"{name}_shape"], [name]) for name in shapes],
+    [
+        helper.make_node("Reshape", ["image", f"{name}_shape"], [name])
+        for name in shapes
+    ],
     [
         helper.make_tensor(f"{name}_shape", TensorProto.INT64, [len(dims)], dims)
         for name, dims in shapes.items()

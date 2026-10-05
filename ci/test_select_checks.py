@@ -1,10 +1,10 @@
 """Run with python3 ci/test_select_checks.py; uses an isolated Git repository."""
 
 import os
-from pathlib import Path
 import subprocess
 import tempfile
 import tomllib
+from pathlib import Path
 
 from select_checks import CRATES, SCOPES, select_checks
 
@@ -21,7 +21,9 @@ def main():
         "Update GSTREAMER_124_CRATES / GSTREAMER_128_CRATES in ci/select_checks.py: "
         f"unclassified={sorted(members - classified)}, removed={sorted(classified - members)}"
     )
-    assert len(CRATES) == len(classified), "Each crate must have exactly one GStreamer classification"
+    assert len(CRATES) == len(classified), (
+        "Each crate must have exactly one GStreamer classification"
+    )
 
     cases = {
         "net/nats/src/lib.rs": "rust format packaging nats gstreamer124",

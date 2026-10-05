@@ -4,7 +4,6 @@ import json
 import subprocess
 import sys
 
-
 SHARED = (
     ":(glob)**/Cargo.toml",
     "Cargo.lock",
@@ -61,8 +60,15 @@ SCOPES = {
 def changed(base, paths):
     result = subprocess.run(
         [
-            "git", "diff", "--quiet", "--no-renames", base, "HEAD", "--",
-            *paths, ":(glob,exclude)**/*.md",
+            "git",
+            "diff",
+            "--quiet",
+            "--no-renames",
+            base,
+            "HEAD",
+            "--",
+            *paths,
+            ":(glob,exclude)**/*.md",
         ],
         check=False,
     )
@@ -73,12 +79,16 @@ def changed(base, paths):
 
 def select_checks(base):
     # Manual runs, merge queues, and unavailable push bases get full coverage.
-    full = not base or subprocess.run(
-        ["git", "cat-file", "-e", f"{base}^{{commit}}"],
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        check=False,
-    ).returncode != 0
+    full = (
+        not base
+        or subprocess.run(
+            ["git", "cat-file", "-e", f"{base}^{{commit}}"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+        ).returncode
+        != 0
+    )
     full = full or changed(base, SHARED)
     checks = {name: full or changed(base, paths) for name, paths in SCOPES.items()}
     checks["any"] = any(checks.values())
@@ -86,4 +96,6 @@ def select_checks(base):
 
 
 if __name__ == "__main__":
-    print("checks=" + json.dumps(select_checks(sys.argv[1] if len(sys.argv) > 1 else "")))
+    print(
+        "checks=" + json.dumps(select_checks(sys.argv[1] if len(sys.argv) > 1 else ""))
+    )
