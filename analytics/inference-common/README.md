@@ -5,11 +5,9 @@ model-agnostic inference plugins. It reads GStreamer model-info 1.0 with
 GLib's key-file parser and owns image preprocessing, engine-neutral tensor
 values, tensor caps construction, and `GstTensorMeta` attachment.
 
-Its deterministic ONNX/model-info fixtures are also the shared compatibility
-contract used by backend parity tests: `identity` covers the basic image
-contract, `masked-frames` covers model initializers, symbolic dimensions bound
-by model-info, and output subsets, and `masked-sequence` covers upstream
-tensor inputs shared by ORT and Tract, including an upstream mask and scale.
+Shared [ONNX fixtures](tests/fixtures/PROVENANCE.md) exercise numerical
+parity, tensor metadata, input selection, and fixed-shape handling across
+both backends.
 
 Preprocessing decodes truthful RGB, BGR, RGBA, or BGRA source pixels into
 semantic red, green, and blue values, then packs them in the channel order
@@ -71,19 +69,29 @@ video structure and add a `tensors` group keyed by `group-id`; each
 `tensor/strided` descriptor contains the declared dimensions, order, type, and
 tensor ID. Each declared output becomes a separate buffer in `GstTensorMeta`.
 
-Model-info dimensions are authoritative: they bind the model's symbolic
-(dynamic) dimensions, while fixed model dimensions must match. A model may
-have more outputs than model-info declares; only declared outputs are
-requested and attached.
+Upstream model-info permits `-1` as a wildcard for a dynamic dimension.
+These plugins do not yet support that notation in `.modelinfo`: each axis
+must have a concrete positive size, including axes that are symbolic in the
+ONNX model. This is an implementation limitation, not a format restriction.
+Declared sizes bind symbolic model dimensions; fixed model dimensions must
+match. A model may have more outputs than model-info declares; only declared
+outputs are requested and attached.
 
 Fixed constants belong in the model graph as initializers. Additional runtime
 inputs must be supplied upstream in tensor-input mode. Unknown model-info
 fields are ignored, as upstream specifies.
 
 Every model input must be declared, and model-info must not declare tensors
-the model lacks. Non-unit batch sizes and runtime/model-info shape or
-scalar-type mismatches are rejected. Video mode additionally rejects more
-than one image input and non-image models.
+the model lacks. Shapes must be fixed, nonempty, and positive, and tensor sizes
+must fit platform limits. Rank-zero scalars, zero-length axes, per-buffer shape
+changes, and runtime shape/type mismatches are unsupported. Generic inputs and
+all outputs may have shapes such as `[6]`, `[2,3]`, or `[2,1,128]`; their first
+axis need not represent a batch. Only the video image input requires batch one.
+
+In video mode, `dims-order` accepts `row-major` (the default) or `col-major`.
+The declared order is copied into output caps and `GstTensorMeta`; model bytes
+are not transposed. The model and downstream decoder must agree on the layout.
+Video input packing is determined by image dimensions and `model-channel-order`.
 
 ## Tensor-input inference
 
@@ -126,8 +134,9 @@ with its object. That workflow is not implemented by input selection alone.
 The model-info file is the same format without the image rules: one or more
 inputs of any supported type and dimensions that bind the model's symbolic
 dimensions. Inputs are already preprocessed, so `ranges` is unused in this
-mode. All tensors must use row-major dimension order and retain a batch
-dimension of one. Tensor byte sizes must fit the platform allocation limit.
+mode. All tensors use row-major dimension order and fixed shapes; the first
+axis need not be one. One complete input set causes one invocation, with no
+automatic batching across carriers or recurrent-state feedback.
 
 ```ini
 [modelinfo]
@@ -156,3 +165,22 @@ dir=output
 In this example the model's mask input must actually be `uint8` (the model
 can cast it internally). `model-file`, `model-info-file`, and
 `execution-provider` behave as in video mode.
+
+## Compatibility
+
+A working pipeline needs a graph supported by the selected backend, compatible
+tensor shapes and types, correct preprocessing, and a decoder for its outputs.
+Successful startup does not prove inference or task correctness, and ORT and
+Tract may support different graphs.
+
+- **Fixture-tested:** CPU inference, numerical parity, caps, metadata, input
+  selection, and carrier preservation. See [fixture provenance](tests/fixtures/PROVENANCE.md).
+- **Real-model recipes:** none documented here. A recipe should pin its model
+  and auxiliary assets, describe preprocessing and decoding, and record a
+  reproduced result.
+- **Other models:** untested until their exact export and pipeline are exercised;
+  fixture results do not establish support for an entire model family.
+
+The ORT [inspection example](../ort-inference/README.md#inspect-a-local-model)
+reports model metadata and checks the CPU startup contract without running
+inference.

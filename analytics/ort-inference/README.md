@@ -20,6 +20,11 @@ both modes; `model-channel-order` affects only video mode. Input mode is
 explicit: existing tensor metadata never changes how video mode processes
 pixels. Tensor mode does not read the carrier's payload as model input.
 
+Tensor inputs and outputs may have non-unit leading dimensions. Batch-one
+image rules apply only to video input. See the shared [model-info contract](../inference-common/README.md#model-info-contract)
+for shape and layout requirements and [compatibility](../inference-common/README.md#compatibility)
+for the scope of the fixture tests.
+
 For primary/secondary model chaining, use two `ortinference` instances with
 the secondary in `input-mode=tensor-meta`; map its input IDs to the primary's
 output IDs. Use distinct output IDs and group IDs for each stage. See
@@ -151,3 +156,35 @@ cargo test -p gst-plugin-ort-inference --test ortinference benchmark_fixture -- 
 ```
 
 It measures development overhead, not production performance.
+
+## Inspect a local model
+
+The `model_info` example displays embedded model metadata and grouped lists
+of inputs and outputs with their types and dimensions. Optionally supply
+model-info and an input mode to run the element's CPU startup checks.
+
+From the repository root:
+
+```sh
+# Inspect metadata.
+cargo run -p gst-plugin-ort-inference --example model_info -- \
+  analytics/inference-common/tests/fixtures/masked-sequence.onnx
+
+# Check a prepared-tensor contract.
+cargo run -p gst-plugin-ort-inference --example model_info -- \
+  analytics/inference-common/tests/fixtures/tensor-axes.onnx \
+  analytics/inference-common/tests/fixtures/tensor-axes.onnx.modelinfo \
+  tensor-meta
+```
+
+Usage: `model_info MODEL.onnx [MODEL.modelinfo video|tensor-meta]`.
+Use `video` to check the image input profile. Dimension names are
+symbolic; `?` means an unnamed unknown dimension. These plugins currently need
+fixed positive sizes in model-info; upstream `-1` wildcards are not yet
+supported. Unsupported types and shapes are annotated.
+
+With model-info, the example prints `Startup check: PASS` or exits nonzero
+with the failure details. Without it, the contract is `NOT CHECKED`. PASS only
+validates CPU startup: no buffers are sent, so inference, preprocessing,
+decoding, and task correctness remain untested. The example does not download
+models or generate model-info.
