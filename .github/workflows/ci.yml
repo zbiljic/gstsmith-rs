@@ -164,7 +164,9 @@ jobs:
       - name: Install GStreamer 1.24
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
+          sudo apt-get \
+            -o DPkg::Lock::Timeout=300 \
+            install -y --no-install-recommends \
             gstreamer1.0-plugins-base \
             gstreamer1.0-tools \
             libbz2-dev \
@@ -265,6 +267,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get \
+            -o DPkg::Lock::Timeout=300 \
             -o Dir::Cache::archives="$HOME/.cache/apt/archives" \
             -o APT::Keep-Downloaded-Packages=true \
             install -y --no-install-recommends \
