@@ -9,6 +9,8 @@ pub enum InputTensor {
 #[derive(Debug)]
 pub struct OwnedTensor {
     pub description: TensorDescription,
+    /// Actual dimensions of this tensor, never wildcard declarations.
+    pub dims: Vec<usize>,
     pub bytes: Vec<u8>,
 }
 
@@ -42,6 +44,14 @@ pub enum TensorValues {
 impl TensorValues {
     /// Decode `tensor`'s bytes according to its description.
     pub fn decode(tensor: &OwnedTensor) -> Result<Self, String> {
+        let size = tensor.description.validate_dims(&tensor.dims)?;
+        if tensor.bytes.len() != size {
+            return Err(format!(
+                "tensor {} holds {} bytes; its shape requires {size}",
+                tensor.description.id,
+                tensor.bytes.len()
+            ));
+        }
         macro_rules! values {
             ($type:ty, $variant:ident) => {{
                 let (chunks, rest) = tensor.bytes.as_chunks::<{ size_of::<$type>() }>();

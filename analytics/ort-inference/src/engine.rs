@@ -56,6 +56,7 @@ impl EngineOptions {
 /// on one session and, importantly, owns all output copies before unlocking.
 struct SessionPlan {
     session: Mutex<Session>,
+    /// Output constraints combine model-info with fixed ONNX axes.
     outputs: Vec<TensorDescription>,
     /// Requests only the outputs model-info declares.
     run_options: RunOptions<HasSelectedOutputs>,
@@ -154,7 +155,7 @@ impl SessionPlan {
         let session = builder
             .commit_from_file(model_file)
             .map_err(|error| format!("failed to load ONNX model: {error}"))?;
-        validate_session(&session, provided, outputs)?;
+        let outputs = validate_session(&session, provided, outputs)?;
         let selector = outputs
             .iter()
             .fold(OutputSelector::no_default(), |selector, output| {
@@ -165,18 +166,13 @@ impl SessionPlan {
             .with_outputs(selector);
         Ok(Self {
             session: Mutex::new(session),
-            outputs: outputs.to_vec(),
+            outputs,
             run_options,
         })
     }
 
     /// Run with the provided inputs (name, value).
     fn run(&self, provided: Vec<(&str, ort::value::DynValue)>) -> Result<Vec<OwnedTensor>, String> {
-        let mut inputs: Vec<(std::borrow::Cow<'_, str>, SessionInputValue<'_>)> =
-            Vec::with_capacity(provided.len());
-        for (name, value) in provided {
-            inputs.push((name.into(), value.into()));
-        }
         // ORT's borrowed TensorRef cannot outlive the input buffer while the
         // session runs. Tensor::from_array consumes the input Vec into an
         // owned Value (rather than copying it), while output bytes are copied
@@ -185,6 +181,22 @@ impl SessionPlan {
             .session
             .lock()
             .map_err(|_error| "ONNX Runtime session lock is poisoned".to_owned())?;
+        // A repeated ONNX dimension symbol describes the same size across inputs.
+        // ORT may otherwise accept mismatches through operator broadcasting.
+        let mut symbols = std::collections::BTreeMap::new();
+        for (name, value) in &provided {
+            let model = session
+                .inputs()
+                .iter()
+                .find(|input| input.name() == *name)
+                .ok_or_else(|| format!("unknown model input {name:?}"))?;
+            validate_input_shape(name, model.dtype(), value.dtype(), &mut symbols)?;
+        }
+        let mut inputs: Vec<(std::borrow::Cow<'_, str>, SessionInputValue<'_>)> =
+            Vec::with_capacity(provided.len());
+        for (name, value) in provided {
+            inputs.push((name.into(), value.into()));
+        }
         let values = session
             .run_with_options(inputs, &self.run_options)
             .map_err(|error| format!("ONNX Runtime inference failed: {error}"))?;
@@ -196,9 +208,25 @@ impl SessionPlan {
                     format!("ONNX Runtime did not return output {:?}", description.name)
                 })?;
                 validate_type(value.dtype(), description, "output", index)?;
+                let ValueType::Tensor { shape, .. } = value.dtype() else {
+                    return Err(format!("output {index} is not a tensor"));
+                };
+                let dims = shape
+                    .iter()
+                    .map(|dim| usize::try_from(*dim))
+                    .collect::<Result<Vec<_>, _>>()
+                    .map_err(|_error| format!("output {index} has unresolved dimensions"))?;
+                let size = description.validate_dims(&dims)?;
                 let bytes = tensor_bytes(value, description.data_type)
                     .map_err(|error| format!("failed to serialize output {index}: {error}"))?;
+                if bytes.len() != size {
+                    return Err(format!(
+                        "output {index} byte size mismatch: expected {size}, got {}",
+                        bytes.len()
+                    ));
+                }
                 Ok(OwnedTensor {
+                    dims,
                     description: description.clone(),
                     bytes,
                 })
@@ -211,11 +239,11 @@ impl Engine for OrtEngine {
     fn run(&self, input: InputTensor) -> Result<Vec<OwnedTensor>, String> {
         let input_value = match (self.input.data_type, input) {
             (ScalarType::Float32, InputTensor::Float32(values)) => {
-                Tensor::from_array((self.input.dims.clone(), values))
+                Tensor::from_array((self.input.concrete_dims()?, values))
                     .map(ort::value::Value::into_dyn)
             }
             (ScalarType::Uint8, InputTensor::Uint8(values)) => {
-                Tensor::from_array((self.input.dims.clone(), values))
+                Tensor::from_array((self.input.concrete_dims()?, values))
                     .map(ort::value::Value::into_dyn)
             }
             _ => return Err("preprocessor produced the wrong input scalar type".to_owned()),
@@ -227,10 +255,14 @@ impl Engine for OrtEngine {
 
 impl TensorEngine for OrtTensorEngine {
     fn run(&self, inputs: &[OwnedTensor]) -> Result<Vec<OwnedTensor>, String> {
+        if inputs.len() != self.inputs.len() {
+            return Err("wrong number of input tensors".to_owned());
+        }
         let provided = inputs
             .iter()
             .zip(&self.inputs)
             .map(|(input, description)| {
+                description.validate_dims(&input.dims)?;
                 owned_tensor_value(input).map(|value| (description.name.as_str(), value))
             })
             .collect::<Result<Vec<_>, String>>()?;
@@ -238,9 +270,51 @@ impl TensorEngine for OrtTensorEngine {
     }
 }
 
+fn validate_input_shape(
+    name: &str,
+    model: &ValueType,
+    actual: &ValueType,
+    symbols: &mut std::collections::BTreeMap<String, i64>,
+) -> Result<(), String> {
+    let (
+        ValueType::Tensor {
+            shape: expected,
+            dimension_symbols,
+            ..
+        },
+        ValueType::Tensor { shape: actual, .. },
+    ) = (model, actual)
+    else {
+        return Err(format!("input {name:?} must be a tensor"));
+    };
+    if expected.len() != actual.len() {
+        return Err(format!("input {name:?} rank mismatch"));
+    }
+    for ((expected, actual), symbol) in expected
+        .iter()
+        .zip(actual.iter())
+        .zip(dimension_symbols.iter())
+    {
+        if *expected != -1 && expected != actual {
+            return Err(format!(
+                "input {name:?} dimensions mismatch: model axis {expected}, tensor axis {actual}"
+            ));
+        }
+        if !symbol.is_empty()
+            && let Some(previous) = symbols.insert(symbol.clone(), *actual)
+            && previous != *actual
+        {
+            return Err(format!(
+                "input {name:?} dimension symbol {symbol:?} mismatch: {previous} versus {actual}"
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// An ORT tensor with the owned tensor's type, shape, and values.
 fn owned_tensor_value(input: &OwnedTensor) -> Result<ort::value::DynValue, String> {
-    let dims = input.description.dims.clone();
+    let dims = input.dims.clone();
     let value = match TensorValues::decode(input)? {
         TensorValues::Float16(bits) => Tensor::from_array((
             dims,
@@ -288,12 +362,13 @@ fn owned_tensor_value(input: &OwnedTensor) -> Result<ort::value::DynValue, Strin
     })
 }
 
+/// Validate the declarations and retain the intersection of output constraints.
 /// Every model input and declared tensor must exist; outputs may be a subset.
 fn validate_session(
     session: &Session,
     provided: &[TensorDescription],
     outputs: &[TensorDescription],
-) -> Result<(), String> {
+) -> Result<Vec<TensorDescription>, String> {
     for (index, input) in session.inputs().iter().enumerate() {
         let description = provided
             .iter()
@@ -318,7 +393,8 @@ fn validate_session(
             ));
         }
     }
-    for (index, description) in outputs.iter().enumerate() {
+    let mut constrained_outputs = outputs.to_vec();
+    for (index, description) in constrained_outputs.iter_mut().enumerate() {
         let output = session
             .outputs()
             .iter()
@@ -330,8 +406,19 @@ fn validate_session(
                 )
             })?;
         validate_type(output.dtype(), description, "output", index)?;
+        let ValueType::Tensor { shape, .. } = output.dtype() else {
+            return Err(format!("output {index} is not a tensor"));
+        };
+        // A wildcard relaxes model-info only, never a fixed axis in the model.
+        // Keep this engine constraint separate from the declared public caps.
+        for (declared, model) in description.dims.iter_mut().zip(shape.iter()) {
+            if *declared == -1 {
+                *declared = i32::try_from(*model)
+                    .map_err(|_error| format!("output {index} dimension exceeds tensor limits"))?;
+            }
+        }
     }
-    Ok(())
+    Ok(constrained_outputs)
 }
 
 fn validate_type(
@@ -349,6 +436,15 @@ fn validate_type(
             "{direction} {index} scalar type mismatch: model {ty:?}, model-info {expected_type:?}"
         ));
     }
+    if shape.is_empty()
+        || shape
+            .iter()
+            .any(|dim| *dim != -1 && (*dim <= 0 || *dim > i64::from(i32::MAX)))
+    {
+        return Err(format!(
+            "{direction} {index} has unsupported dimensions {shape:?}"
+        ));
+    }
     // ONNX Runtime reports dynamic dimensions as -1.
     let actual = shape
         .iter()
@@ -356,7 +452,7 @@ fn validate_type(
         .collect::<Vec<_>>();
     if !dims_match(&actual, &description.dims) {
         return Err(format!(
-            "{direction} {index} dimensions mismatch: model {shape:?}, model-info {:?}",
+            "{direction} {index} dimensions mismatch: actual {shape:?}, required {:?}",
             description.dims
         ));
     }
@@ -456,9 +552,14 @@ mod tests {
             .iter()
             .map(|description| OwnedTensor {
                 description: description.clone(),
+                dims: description.concrete_dims().expect("fixed fixture"),
                 bytes: vec![
                     0;
-                    description.dims.iter().product::<usize>()
+                    description
+                        .concrete_dims()
+                        .expect("fixed fixture")
+                        .iter()
+                        .product::<usize>()
                         * description.data_type.size()
                 ],
             })

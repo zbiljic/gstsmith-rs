@@ -104,9 +104,57 @@ pub struct TensorDescription {
     pub name: String,
     pub id: String,
     pub data_type: ScalarType,
-    pub dims: Vec<usize>,
+    /// Declared axes: positive sizes or the model-info wildcard `-1`.
+    pub dims: Vec<i32>,
     pub dim_order: DimOrder,
     pub ranges: Vec<(f32, f32)>,
+}
+
+impl TensorDescription {
+    /// Resolve a fixed declaration for backends and modes requiring static shapes.
+    pub fn concrete_dims(&self) -> Result<Vec<usize>, String> {
+        let dims = self
+            .dims
+            .iter()
+            .map(|dim| usize::try_from(*dim))
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|_error| format!("tensor {:?} requires concrete dimensions", self.name))?;
+        self.validate_dims(&dims)?;
+        Ok(dims)
+    }
+
+    /// Validate actual axes against the declaration and return the checked byte size.
+    pub fn validate_dims(&self, dims: &[usize]) -> Result<usize, String> {
+        if dims.len() != self.dims.len()
+            || !dims.iter().zip(&self.dims).all(|(actual, declared)| {
+                *declared == -1 || usize::try_from(*declared) == Ok(*actual)
+            })
+        {
+            return Err(format!(
+                "tensor {:?} dimensions mismatch: actual {dims:?}, model-info {:?}",
+                self.name, self.dims
+            ));
+        }
+        tensor_byte_size(dims, self.data_type)
+            .map_err(|error| format!("tensor {:?}: {error}", self.name))
+    }
+}
+
+/// Check every axis and multiplication before allocating or constructing a `GstTensor`.
+fn tensor_byte_size(dims: &[usize], data_type: ScalarType) -> Result<usize, String> {
+    if dims.is_empty()
+        || dims
+            .iter()
+            .any(|dim| *dim == 0 || i32::try_from(*dim).is_err())
+    {
+        return Err(
+            "tensor axes must be nonempty, positive, and representable by tensor caps".to_owned(),
+        );
+    }
+    dims.iter()
+        .try_fold(data_type.size(), |size, dim| size.checked_mul(*dim))
+        .filter(|size| isize::try_from(*size).is_ok())
+        .ok_or_else(|| "tensor byte size exceeds the platform allocation limit".to_owned())
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -300,14 +348,18 @@ fn parse_tensor(section: &Section, kind: ModelKind) -> Result<ParsedTensor, Stri
     let id = non_empty(require(section, "id", name)?, "id")?.to_owned();
     let dims = parse_dims(require(section, "dims", name)?)?;
     let data_type = ScalarType::parse(require(section, "type", name)?)?;
-    dims.iter()
-        .try_fold(data_type.size(), |size, dimension| {
-            size.checked_mul(*dimension)
-        })
-        .and_then(|size| isize::try_from(size).ok())
-        .ok_or_else(|| {
-            format!("tensor {name:?} byte size exceeds the platform allocation limit")
-        })?;
+    if kind == ModelKind::Image && dims.contains(&-1) {
+        return Err(
+            "wildcard dimensions are not supported in video mode; use ORT tensor-meta mode"
+                .to_owned(),
+        );
+    }
+    // Unknown axes are at least one; reject impossible declarations immediately.
+    let minimum = dims
+        .iter()
+        .map(|dim| usize::try_from(*dim).unwrap_or(1))
+        .collect::<Vec<_>>();
+    tensor_byte_size(&minimum, data_type)?;
     let dim_order = DimOrder::parse(section.values.get("dims-order").map(String::as_str))?;
     if kind == ModelKind::Tensor && dim_order != DimOrder::RowMajor {
         return Err(format!(
@@ -402,22 +454,26 @@ fn non_empty<'a>(value: &'a str, name: &str) -> Result<&'a str, String> {
     }
 }
 
-fn parse_dims(value: &str) -> Result<Vec<usize>, String> {
+fn parse_dims(value: &str) -> Result<Vec<i32>, String> {
     let dims: Result<Vec<_>, _> = value
         .split(',')
         .map(|part| {
             part.trim()
-                .parse::<usize>()
-                .map_err(|_error| format!("invalid static dimension {part:?}"))
+                .parse::<i32>()
+                .map_err(|_error| format!("invalid dimension {part:?}"))
         })
         .collect();
     let dims = dims?;
     if dims.is_empty() {
         return Err("dimensions must not be empty".to_owned());
     }
-    if dims.contains(&0) || dims.iter().any(|dimension| *dimension > i32::MAX as usize) {
+    if dims
+        .iter()
+        .any(|dimension| *dimension != -1 && *dimension <= 0)
+    {
         return Err(
-            "dimensions must be positive, static, and representable by tensor caps".to_owned(),
+            "dimensions must be positive sizes or -1 wildcards, representable by tensor caps"
+                .to_owned(),
         );
     }
     Ok(dims)
@@ -453,14 +509,13 @@ fn parse_ranges(value: &str) -> Result<Vec<(f32, f32)>, String> {
 
 /// Whether a model's tensor shape accepts the model-info dimensions: ranks
 /// agree, dynamic model dimensions (`None`) accept any declared size, and
-/// fixed ones must be equal. Model-info binds the dynamic dimensions.
+/// fixed ones must agree unless the declaration is a wildcard.
 #[must_use]
-pub fn dims_match(model: &[Option<usize>], declared: &[usize]) -> bool {
+pub fn dims_match(model: &[Option<usize>], declared: &[i32]) -> bool {
     model.len() == declared.len()
-        && model
-            .iter()
-            .zip(declared)
-            .all(|(model, declared)| model.is_none_or(|model| model == *declared))
+        && model.iter().zip(declared).all(|(model, declared)| {
+            *declared == -1 || model.is_none_or(|model| usize::try_from(*declared) == Ok(model))
+        })
 }
 
 /// How an image input packs one RGB frame.
@@ -475,7 +530,7 @@ pub struct ImageLayout {
 /// then any other unit dimensions such as a frame count) followed by
 /// `3,H,W` or `H,W,3`.
 #[must_use]
-pub fn image_layout(dims: &[usize]) -> Option<ImageLayout> {
+pub fn image_layout(dims: &[i32]) -> Option<ImageLayout> {
     let split = dims.len().checked_sub(3)?;
     let (leading, image) = dims.split_at(split);
     if leading.is_empty() || leading.iter().any(|dimension| *dimension != 1) {
@@ -484,13 +539,13 @@ pub fn image_layout(dims: &[usize]) -> Option<ImageLayout> {
     match image {
         [3, height, width] if *width != 3 => Some(ImageLayout {
             channels_first: true,
-            height: *height,
-            width: *width,
+            height: usize::try_from(*height).ok()?,
+            width: usize::try_from(*width).ok()?,
         }),
         [height, width, 3] if *height != 3 => Some(ImageLayout {
             channels_first: false,
-            height: *height,
-            width: *width,
+            height: usize::try_from(*height).ok()?,
+            width: usize::try_from(*width).ok()?,
         }),
         _ => None,
     }
@@ -612,6 +667,35 @@ mod tests {
     }
 
     #[test]
+    fn wildcard_declarations_validate_concrete_axes_and_sizes() {
+        let info =
+            TensorModelInfo::parse(&TENSOR_MODEL.replace("dims=1,400,768", "dims=-1,-1,768"))
+                .expect("wildcard model-info parses");
+        let input = &info.inputs()[0];
+        assert_eq!(input.dims, [-1, -1, 768]);
+        let _error = input
+            .concrete_dims()
+            .expect_err("wildcard declaration is unresolved");
+        assert_eq!(input.validate_dims(&[2, 4, 768]), Ok(24576));
+        for dims in [
+            vec![1, 4, 767],
+            vec![1, 768],
+            vec![0, 4, 768],
+            vec![usize::MAX, 4, 768],
+            vec![2_147_483_647, 2_147_483_647, 768],
+        ] {
+            assert!(input.validate_dims(&dims).is_err(), "{dims:?}");
+        }
+        assert!(dims_match(&[Some(2), None, Some(768)], &input.dims));
+        assert!(!dims_match(&[Some(2), None, Some(767)], &input.dims));
+        assert!(
+            ModelInfo::parse(&VALID.replace("dims=1,18", "dims=1,-1"))
+                .expect_err("video wildcards unsupported")
+                .contains("video mode")
+        );
+    }
+
+    #[test]
     fn ignores_unknown_fields() {
         let expected = TensorModelInfo::parse(TENSOR_MODEL).expect("tensor model parses");
         let contents =
@@ -645,7 +729,7 @@ mod tests {
         for invalid in [
             TENSOR_MODEL.replace("dims=1,400,768", "dims="),
             TENSOR_MODEL.replace("dims=1,400,768", "dims=0,400,768"),
-            TENSOR_MODEL.replace("dims=1,400,768", "dims=-1,400,768"),
+            TENSOR_MODEL.replace("dims=1,400,768", "dims=-2,400,768"),
             TENSOR_MODEL.replace("dims=1,400,768", "dims=2147483648"),
             TENSOR_MODEL.replace("dims=1,400,768", "dims=1,2147483647,2147483647,2147483647"),
             TENSOR_MODEL.replace("dims=1,400,768", "dims=1,2147483647,2147483647"),

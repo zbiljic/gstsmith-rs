@@ -87,16 +87,23 @@ fn assert_axis_contract(
                 usize::try_from(v.get::<i32>().expect("dimension")).expect("positive dimension")
             })
             .collect::<Vec<_>>();
-        assert_eq!(dims, description.dims);
+        assert_eq!(dims, description.concrete_dims().expect("fixed fixture"));
         let tensor = output
             .iter_meta::<gst_analytics::TensorMeta>()
             .flat_map(|meta| meta.as_slice().to_vec())
             .find(|tensor| tensor.id().as_str() == description.id.as_str())
             .expect("output tensor");
-        assert_eq!(tensor.dims(), description.dims);
+        assert_eq!(
+            tensor.dims(),
+            description.concrete_dims().expect("fixed fixture")
+        );
         assert_eq!(tensor.data_type(), gst_analytics::TensorDataType::Float32);
         assert_eq!(tensor.dims_order(), gst_analytics::TensorDimOrder::RowMajor);
-        let expected = (1..=description.dims.iter().product::<usize>())
+        let expected = (1..=description
+            .concrete_dims()
+            .expect("fixed fixture")
+            .iter()
+            .product::<usize>())
             .map(|v| f32::from(u16::try_from(v).expect("small fixture")))
             .collect::<Vec<_>>();
         assert_eq!(float_values(output, &description.id), expected);
@@ -120,13 +127,17 @@ fn non_unit_leading_axes_survive_tensor_inference() {
             .iter()
             .rev()
             .map(|input| {
-                let bytes = (1..=input.dims.iter().product::<usize>())
+                let bytes = (1..=input
+                    .concrete_dims()
+                    .expect("fixed fixture")
+                    .iter()
+                    .product::<usize>())
                     .flat_map(|v| f32::from(u16::try_from(v).expect("small fixture")).to_le_bytes())
                     .collect();
                 tensor(
                     &input.id,
                     gst_analytics::TensorDataType::Float32,
-                    &input.dims,
+                    &input.concrete_dims().expect("fixed fixture"),
                     bytes,
                 )
             })
@@ -152,6 +163,357 @@ fn video_outputs_have_arbitrary_axes_and_truthful_memory_order() {
         let input = gst::Buffer::from_mut_slice(vec![1_u8, 2, 3, 4, 5, 6, 0, 0]);
         let output = h.push_and_pull(input).expect("video inference");
         assert_axis_contract(&h, &output, info.caps_contract());
+    }
+}
+
+fn wildcard_info() -> String {
+    MODEL_INFO.replace("dims=1,3", "dims=-1,-1")
+}
+
+fn wildcard_inputs(batch: usize, sequence: usize) -> Vec<gst_analytics::Tensor> {
+    vec![
+        tensor(
+            "sequence",
+            gst_analytics::TensorDataType::Float32,
+            &[batch, sequence, 2],
+            (1..=batch * sequence * 2)
+                .flat_map(|value| {
+                    f32::from(u16::try_from(value).expect("small fixture")).to_le_bytes()
+                })
+                .collect(),
+        ),
+        tensor(
+            "sequence-mask",
+            gst_analytics::TensorDataType::Uint8,
+            &[batch, sequence],
+            vec![1; batch * sequence],
+        ),
+        scale(2.0),
+    ]
+}
+
+#[test]
+fn ort_wildcards_follow_each_buffer_and_keep_caps_stable() {
+    let (mut h, _directory) =
+        fixture_harness("ortinference", MODEL, &wildcard_info(), "tensor-meta");
+    let mut previous_caps = None;
+    for (batch, sequence) in [(1, 3), (2, 4), (1, 1)] {
+        let mut input = buffer(wildcard_inputs(batch, sequence));
+        input
+            .get_mut()
+            .expect("writable input")
+            .set_pts(gst::ClockTime::SECOND);
+        let output = h.push_and_pull(input).expect("dynamic inference");
+        assert_eq!(output.pts(), Some(gst::ClockTime::SECOND));
+        assert_eq!(output.map_readable().expect("carrier").as_slice(), &[7; 4]);
+        assert_eq!(
+            tensor_ids(&output),
+            ["sequence", "sequence-mask", "scale", "scaled"]
+        );
+        let actual = output
+            .iter_meta::<gst_analytics::TensorMeta>()
+            .flat_map(|meta| meta.as_slice().to_vec())
+            .find(|tensor| tensor.id().as_str() == "scaled")
+            .expect("output tensor");
+        assert_eq!(actual.dims(), [batch, sequence, 2]);
+        assert_eq!(actual.data_type(), gst_analytics::TensorDataType::Float32);
+        assert_eq!(actual.dims_order(), gst_analytics::TensorDimOrder::RowMajor);
+        let expected = (1..=batch * sequence * 2)
+            .map(|value| 2.0 * f32::from(u16::try_from(value).expect("small fixture")))
+            .collect::<Vec<_>>();
+        assert_eq!(float_values(&output, "scaled"), expected);
+        let caps = h.sinkpad().expect("sink pad").current_caps().expect("caps");
+        let groups = caps
+            .structure(0)
+            .expect("structure")
+            .get::<gst::Structure>("tensors")
+            .expect("groups");
+        let tensors = groups
+            .get::<gst::UniqueList>("gstsmith-masked-sequence-fixture")
+            .expect("output group");
+        let descriptor = tensors
+            .iter()
+            .next()
+            .expect("descriptor")
+            .get::<gst::Caps>()
+            .expect("tensor caps");
+        let axes = descriptor
+            .structure(0)
+            .expect("structure")
+            .get::<gst::Array>("dims")
+            .expect("axes");
+        assert_eq!(
+            axes.iter()
+                .map(|axis| axis.get::<i32>().expect("axis"))
+                .collect::<Vec<_>>(),
+            [0, 0, 2]
+        );
+        if let Some(previous) = previous_caps {
+            assert_eq!(caps, previous);
+        }
+        previous_caps = Some(caps);
+    }
+}
+
+#[test]
+fn ort_wildcards_reject_rank_fixed_axis_symbol_and_byte_size_mismatches() {
+    init();
+    for replacement in [
+        tensor(
+            "sequence",
+            gst_analytics::TensorDataType::Float32,
+            &[1, 6],
+            vec![0; 24],
+        ),
+        tensor(
+            "sequence",
+            gst_analytics::TensorDataType::Float32,
+            &[1, 3, 3],
+            vec![0; 36],
+        ),
+        // The ONNX graph would broadcast this, but the shared `seq` symbol
+        // requires equal sizes in x and mask.
+        tensor(
+            "sequence-mask",
+            gst_analytics::TensorDataType::Uint8,
+            &[1, 1],
+            vec![1],
+        ),
+        {
+            let mut input = sequence(&[1, 3, 2]);
+            input.data_mut().remove_all_memory();
+            input
+                .data_mut()
+                .append_memory(gst::Memory::from_mut_slice(vec![0; 20]));
+            input
+        },
+    ] {
+        let (mut h, _directory) =
+            fixture_harness("ortinference", MODEL, &wildcard_info(), "tensor-meta");
+        let mut inputs = wildcard_inputs(1, 3);
+        inputs.retain(|input| input.id() != replacement.id());
+        inputs.push(replacement);
+        assert_eq!(h.push(buffer(inputs)), Err(gst::FlowError::Error));
+    }
+    // Wildcard metadata must not bypass a fixed axis in the ONNX model.
+    let (mut h, _directory) = fixture_harness(
+        "ortinference",
+        MODEL,
+        &wildcard_info().replace("dims=-1,-1,2", "dims=-1,-1,-1"),
+        "tensor-meta",
+    );
+    let inputs = vec![
+        tensor(
+            "sequence",
+            gst_analytics::TensorDataType::Float32,
+            &[1, 3, 3],
+            vec![0; 36],
+        ),
+        mask(),
+        scale(2.0),
+    ];
+    assert_eq!(h.push(buffer(inputs)), Err(gst::FlowError::Error));
+}
+
+#[test]
+fn unsupported_wildcard_modes_fail_at_startup() {
+    init();
+    for (factory, mode, contents, expected) in [
+        (
+            "tractinference",
+            "tensor-meta",
+            wildcard_info(),
+            "Tract does not support wildcard dimensions",
+        ),
+        (
+            "ortinference",
+            "video",
+            include_str!("../../inference-common/tests/fixtures/identity.onnx.modelinfo")
+                .replace("dims=1,1,2,3", "dims=1,1,-1,3"),
+            "not supported in video mode",
+        ),
+    ] {
+        let directory = tempfile::tempdir().expect("fixture directory");
+        let model = directory.path().join("fixture.onnx");
+        fs::write(&model, MODEL).expect("fixture model");
+        fs::write(directory.path().join("fixture.onnx.modelinfo"), contents).expect("model-info");
+        let element = gst::ElementFactory::make(factory)
+            .property("model-file", model.to_string_lossy().as_ref())
+            .property_from_str("input-mode", mode)
+            .build()
+            .expect("element");
+        let pipeline = gst::Pipeline::new();
+        pipeline.add(&element).expect("add element");
+        let result = pipeline.set_state(gst::State::Paused);
+        let message = pipeline
+            .bus()
+            .expect("bus")
+            .pop_filtered(&[gst::MessageType::Error])
+            .expect("error message");
+        pipeline.set_state(gst::State::Null).expect("stop pipeline");
+        let _error = result.expect_err("unsupported wildcard mode");
+        let gst::MessageView::Error(error) = message.view() else {
+            panic!("expected error")
+        };
+        assert!(
+            format!("{} {:?}", error.error(), error.debug()).contains(expected),
+            "{message:?}"
+        );
+    }
+}
+
+#[test]
+fn ort_output_dimensions_follow_values_and_reject_empty_outputs() {
+    let model = include_bytes!("../../inference-common/tests/fixtures/tensor-nonzero.onnx");
+    let info = include_str!("../../inference-common/tests/fixtures/tensor-nonzero.onnx.modelinfo");
+    let (mut h, _directory) = fixture_harness("ortinference", model, info, "tensor-meta");
+    for (values, expected) in [
+        (vec![0.0_f32, 2.0, 0.0, 3.0], vec![1_i64, 3]),
+        (vec![1.0, 2.0, 3.0, 4.0], vec![0, 1, 2, 3]),
+        (vec![4.0, 0.0], vec![0]),
+    ] {
+        let output = h
+            .push_and_pull(buffer(vec![tensor(
+                "values",
+                gst_analytics::TensorDataType::Float32,
+                &[values.len()],
+                values
+                    .iter()
+                    .flat_map(|value| value.to_le_bytes())
+                    .collect(),
+            )]))
+            .expect("nonzero inference");
+        let actual = output
+            .iter_meta::<gst_analytics::TensorMeta>()
+            .flat_map(|meta| meta.as_slice().to_vec())
+            .find(|tensor| tensor.id().as_str() == "indices")
+            .expect("indices tensor");
+        assert_eq!(actual.dims(), [1, expected.len()]);
+        assert_eq!(actual.data_type(), gst_analytics::TensorDataType::Int64);
+        assert_eq!(
+            actual
+                .data()
+                .map_readable()
+                .expect("indices bytes")
+                .as_slice(),
+            expected
+                .iter()
+                .flat_map(|value| value.to_le_bytes())
+                .collect::<Vec<_>>()
+        );
+    }
+    // Empty axes cannot be represented by this plugin's current tensor profile.
+    assert_eq!(
+        h.push(buffer(vec![tensor(
+            "values",
+            gst_analytics::TensorDataType::Float32,
+            &[3],
+            vec![0; 12]
+        )])),
+        Err(gst::FlowError::Error)
+    );
+    assert_eq!(h.buffers_in_queue(), 0);
+
+    // A dynamic ONNX output can still be bound by a fixed model-info declaration.
+    let (mut h, _directory) = fixture_harness(
+        "ortinference",
+        model,
+        &info.replace("dims=1,-1", "dims=1,2"),
+        "tensor-meta",
+    );
+    assert_eq!(
+        h.push(buffer(vec![tensor(
+            "values",
+            gst_analytics::TensorDataType::Float32,
+            &[1],
+            1.0_f32.to_le_bytes().to_vec()
+        )])),
+        Err(gst::FlowError::Error)
+    );
+}
+
+#[test]
+fn wildcard_outputs_still_enforce_fixed_model_dimensions() {
+    let model =
+        include_bytes!("../../inference-common/tests/fixtures/tensor-nonzero-fixed-output.onnx");
+    let info = include_str!("../../inference-common/tests/fixtures/tensor-nonzero.onnx.modelinfo");
+    let (mut h, _directory) = fixture_harness("ortinference", model, info, "tensor-meta");
+    for count in [2, 3] {
+        let input = buffer(vec![tensor(
+            "values",
+            gst_analytics::TensorDataType::Float32,
+            &[count],
+            vec![1.0_f32; count]
+                .into_iter()
+                .flat_map(f32::to_le_bytes)
+                .collect(),
+        )]);
+        if count == 2 {
+            let output = h.push_and_pull(input).expect("matching fixed model output");
+            let indices = output
+                .iter_meta::<gst_analytics::TensorMeta>()
+                .flat_map(|meta| meta.as_slice().to_vec())
+                .find(|tensor| tensor.id().as_str() == "indices")
+                .expect("output indices");
+            assert_eq!(indices.dims(), [1, 2]);
+        } else {
+            assert_eq!(
+                h.push(input),
+                Err(gst::FlowError::Error),
+                "wildcard model-info must not bypass ONNX output dimensions"
+            );
+            assert_eq!(h.buffers_in_queue(), 0);
+        }
+    }
+}
+
+#[test]
+fn wildcard_outputs_feed_a_second_inference_element() {
+    init();
+    let directory = tempfile::tempdir().expect("fixture directory");
+    let model = directory.path().join("sequence.onnx");
+    let secondary = directory.path().join("secondary.modelinfo");
+    fs::write(&model, MODEL).expect("fixture model");
+    fs::write(
+        directory.path().join("sequence.onnx.modelinfo"),
+        wildcard_info(),
+    )
+    .expect("primary info");
+    fs::write(
+        &secondary,
+        wildcard_info()
+            .replace(
+                "group-id=gstsmith-masked-sequence-fixture",
+                "group-id=secondary",
+            )
+            .replace("id=sequence\n", "id=scaled\n")
+            .replace("[y]\nid=scaled", "[y]\nid=secondary-scaled"),
+    )
+    .expect("secondary info");
+    let mut h = gst_check::Harness::new_parse(&format!(
+        "ortinference input-mode=tensor-meta model-file=\"{}\" ! ortinference input-mode=tensor-meta model-file=\"{}\" model-info-file=\"{}\"",
+        model.display(),
+        model.display(),
+        secondary.display()
+    ));
+    h.set_src_caps_str("application/x-test");
+    h.play();
+    for sequence in [3, 5, 1] {
+        let output = h
+            .push_and_pull(buffer(wildcard_inputs(1, sequence)))
+            .expect("chained inference");
+        let expected = (1..=sequence * 2)
+            .map(|value| 4.0 * f32::from(u16::try_from(value).expect("small fixture")))
+            .collect::<Vec<_>>();
+        assert_eq!(float_values(&output, "secondary-scaled"), expected);
+        let caps = h.sinkpad().expect("sink pad").current_caps().expect("caps");
+        let groups = caps
+            .structure(0)
+            .expect("structure")
+            .get::<gst::Structure>("tensors")
+            .expect("groups");
+        assert!(groups.has_field("gstsmith-masked-sequence-fixture"));
+        assert!(groups.has_field("secondary"));
     }
 }
 
@@ -258,12 +620,33 @@ fn fixture_metadata_matches_native_gstreamer_model_info() {
                         index,
                         Some(&tensor.name),
                         tensor_data_type(tensor.data_type),
-                        &tensor.dims,
+                        &tensor.concrete_dims().expect("fixed fixture"),
                     )
                     .as_deref(),
                 Some(tensor.name.as_str())
             );
         }
+    }
+    fs::write(
+        directory.path().join("sequence.onnx.modelinfo"),
+        wildcard_info(),
+    )
+    .expect("wildcard model-info");
+    let native = gst_analytics::ModelInfo::load(&model).expect("native wildcard load");
+    assert_eq!(native.version().as_str(), "1.0");
+    for (direction, name) in [(Input, "x"), (Output, "y")] {
+        assert_eq!(
+            native
+                .find_tensor_name(
+                    direction,
+                    0,
+                    Some(name),
+                    gst_analytics::TensorDataType::Float32,
+                    &[2, 5, 2]
+                )
+                .as_deref(),
+            Some(name)
+        );
     }
 }
 

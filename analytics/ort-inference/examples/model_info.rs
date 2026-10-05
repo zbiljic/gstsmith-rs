@@ -160,7 +160,7 @@ fn run() -> Result<(), Box<dyn Error>> {
     }
     if dynamic {
         println!("\nDimensions: names are symbolic; ? is unknown.");
-        println!("Bind them to fixed dimensions in .modelinfo.");
+        println!("Bind them in .modelinfo, or use -1 in tensor-meta mode.");
     }
     drop(session);
     if let Some((info, mode)) = contract {
@@ -230,6 +230,7 @@ mod tests {
             ("masked-frames", "video"),
             ("masked-sequence", "tensor-meta"),
             ("tensor-axes", "tensor-meta"),
+            ("tensor-nonzero", "tensor-meta"),
             ("image-reshape", "video"),
         ] {
             check_contract(
@@ -267,7 +268,7 @@ mod tests {
             ),
             (
                 original.replace("dims=1,1,2,3", "dims=1,1,?,3"),
-                "invalid static dimension",
+                "invalid dimension",
             ),
             (
                 original.replace("dir=output", "dir=output\ndims-order=unknown"),

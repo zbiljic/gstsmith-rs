@@ -69,6 +69,13 @@ pub mod tract {
             outputs: &[TensorDescription],
             execution_provider: ExecutionProvider,
         ) -> Result<Self, String> {
+            if provided
+                .iter()
+                .chain(outputs)
+                .any(|tensor| tensor.dims.contains(&-1))
+            {
+                return Err("Tract does not support wildcard dimensions; use concrete model-info dimensions or ORT tensor-meta mode".to_owned());
+            }
             let mut model = tract_onnx::onnx()
                 .model_for_path(model_file)
                 .map_err(|error| format!("failed to load ONNX model: {error}"))?;
@@ -140,8 +147,10 @@ pub mod tract {
                 .zip(&self.outputs)
                 .map(|(value, description)| {
                     let tensor = value.into_tensor();
+                    description.validate_dims(tensor.shape())?;
                     let bytes = tensor_bytes(&tensor, description.data_type)?;
                     Ok(OwnedTensor {
+                        dims: tensor.shape().to_vec(),
                         description: description.clone(),
                         bytes,
                     })
@@ -177,7 +186,7 @@ pub mod tract {
             validate_fact(runtime_fact, description, "input", index)?;
             facts.push(InferenceFact::dt_shape(
                 datum_type(description.data_type),
-                description.dims.clone(),
+                description.concrete_dims()?,
             ));
             slots.push(slot);
             names.push(name.to_owned());
@@ -250,11 +259,11 @@ pub mod tract {
         fn run(&self, input: InputTensor) -> Result<Vec<OwnedTensor>, String> {
             let tensor = match (self.input.data_type, input) {
                 (ScalarType::Float32, InputTensor::Float32(values)) => {
-                    Tensor::from_shape(&self.input.dims, &values)
+                    Tensor::from_shape(&self.input.concrete_dims()?, &values)
                         .map_err(|error| format!("failed to make float input tensor: {error}"))?
                 }
                 (ScalarType::Uint8, InputTensor::Uint8(values)) => {
-                    Tensor::from_shape(&self.input.dims, &values)
+                    Tensor::from_shape(&self.input.concrete_dims()?, &values)
                         .map_err(|error| format!("failed to make byte input tensor: {error}"))?
                 }
                 _ => return Err("preprocessor produced the wrong input scalar type".to_owned()),
@@ -275,7 +284,7 @@ pub mod tract {
 
     /// A Tract tensor with the owned tensor's type, shape, and values.
     fn tensor_from_owned(input: &OwnedTensor) -> Result<Tensor, String> {
-        let dims = &input.description.dims;
+        let dims = &input.dims;
         let tensor = match TensorValues::decode(input)? {
             TensorValues::Float16(bits) => Tensor::from_shape(
                 dims,
@@ -362,7 +371,7 @@ pub mod tract {
             .as_concrete()
             .ok_or_else(|| format!("{direction} {index} has dynamic dimensions"))?;
         let actual = shape.to_vec();
-        if actual != descriptor.dims {
+        if actual != descriptor.concrete_dims()? {
             return Err(format!(
                 "{direction} {index} dimensions mismatch: model {actual:?}, model-info {:?}",
                 descriptor.dims

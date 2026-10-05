@@ -46,3 +46,19 @@ save(
         for name, dims in shapes.items()
     ],
 )
+
+# The output length depends on values, not just the input shape.
+save(
+    "tensor-nonzero",
+    [value("x", ["length"])],
+    [helper.make_tensor_value_info("indices", TensorProto.INT64, [1, "count"])],
+    [helper.make_node("NonZero", ["x"], ["indices"])],
+)
+
+# Deliberately inconsistent annotation: three nonzero values violate [1, 2].
+save(
+    "tensor-nonzero-fixed-output",
+    [value("x", ["length"])],
+    [helper.make_tensor_value_info("indices", TensorProto.INT64, [1, 2])],
+    [helper.make_node("NonZero", ["x"], ["indices"])],
+)

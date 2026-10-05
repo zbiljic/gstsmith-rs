@@ -179,7 +179,7 @@ mod tests {
 
     use super::{ChannelOrder, InputTensor, PixelFormat, preprocess};
 
-    fn input(dims: Vec<usize>) -> TensorDescription {
+    fn input(dims: Vec<i32>) -> TensorDescription {
         TensorDescription {
             name: "input".to_owned(),
             id: "input".to_owned(),
@@ -309,7 +309,7 @@ mod tests {
             stride: usize,
             format: PixelFormat,
             order: ChannelOrder,
-            dims: Vec<usize>,
+            dims: Vec<i32>,
             expected: &'static [f32],
         }
 
@@ -370,11 +370,9 @@ mod tests {
             let processed = preprocess(
                 case.source,
                 case.stride,
-                if description.dims.get(1) == Some(&3) {
-                    description.dims[3]
-                } else {
-                    description.dims[2]
-                },
+                crate::model_info::image_layout(&description.dims)
+                    .expect("fixed image fixture")
+                    .width,
                 1,
                 case.format,
                 case.order,

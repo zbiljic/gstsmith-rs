@@ -4,13 +4,9 @@ use gst::prelude::*;
 use crate::engine::OwnedTensor;
 use crate::model_info::{CapsContract, DimOrder, ScalarType, TensorDescription, TensorModelInfo};
 
-#[expect(
-    clippy::cast_possible_truncation,
-    clippy::cast_possible_wrap,
-    reason = "model-info parsing rejects dimensions outside the i32 GStreamer caps range"
-)]
 #[must_use]
 pub fn tensor_caps(tensor: &TensorDescription) -> gst::Caps {
+    // GStreamer tensor caps use zero for unknown axes; GstTensorMeta stays concrete.
     gst::Caps::builder("tensor/strided")
         .field(
             "dims",
@@ -18,7 +14,7 @@ pub fn tensor_caps(tensor: &TensorDescription) -> gst::Caps {
                 tensor
                     .dims
                     .iter()
-                    .map(|dimension| (*dimension as i32).to_send_value()),
+                    .map(|dimension| (*dimension).max(0).to_send_value()),
             ),
         )
         .field("dims-order", tensor.dim_order.as_caps_name())
@@ -42,7 +38,7 @@ pub fn attach_tensors(buffer: &mut gst::BufferRef, outputs: Vec<OwnedTensor>) {
                 data_type,
                 data,
                 order,
-                &output.description.dims,
+                &output.dims,
             )
         })
         .collect::<Vec<_>>();
@@ -139,7 +135,7 @@ pub fn fixate_caps(
 /// The inputs of `info`, read by tensor id from the
 /// `GstTensorMeta`s on `buffer`: `None` when no input is present, an error
 /// when only some are, when a required id is ambiguous, or when one does
-/// not match its model-info exactly.
+/// not match its model-info constraints.
 pub fn collect_inputs(
     buffer: &gst::BufferRef,
     info: &TensorModelInfo,
@@ -199,13 +195,7 @@ fn read_input(
             tensor.data_type()
         ));
     }
-    if tensor.dims() != description.dims.as_slice() {
-        return Err(format!(
-            "input {id} dimensions mismatch: tensor {:?}, model-info {:?}",
-            tensor.dims(),
-            description.dims
-        ));
-    }
+    let size = description.validate_dims(tensor.dims())?;
     let expected_order = match description.dim_order {
         DimOrder::RowMajor => gst_analytics::TensorDimOrder::RowMajor,
         DimOrder::ColMajor => gst_analytics::TensorDimOrder::ColMajor,
@@ -216,12 +206,6 @@ fn read_input(
             tensor.dims_order()
         ));
     }
-    let size = description
-        .dims
-        .iter()
-        .product::<usize>()
-        .checked_mul(description.data_type.size())
-        .ok_or_else(|| format!("input {id} size overflows"))?;
     let map = tensor
         .data()
         .map_readable()
@@ -234,6 +218,7 @@ fn read_input(
     }
     Ok(OwnedTensor {
         description: description.clone(),
+        dims: tensor.dims().to_vec(),
         bytes: map.as_slice().to_vec(),
     })
 }
@@ -257,6 +242,44 @@ mod tests {
     use crate::model_info::ModelInfo;
 
     const MODEL_INFO: &str = include_str!("../tests/fixtures/identity.onnx.modelinfo");
+
+    #[test]
+    fn wildcard_caps_use_unknown_axes_without_fixating_them_to_a_size() {
+        gst::init().expect("initializing GStreamer");
+        let info = TensorModelInfo::parse(&MODEL_INFO.replace("dims=1,1,2,3", "dims=-1,1,-1,3"))
+            .expect("wildcard model-info");
+        let carrier = gst::Caps::new_empty_simple("application/x-test");
+        let caps = transform_caps(
+            Some(info.caps_contract()),
+            gst::PadDirection::Sink,
+            &carrier,
+            None,
+        );
+        let fixed = fixate_caps(
+            Some(info.caps_contract()),
+            gst::PadDirection::Sink,
+            &carrier,
+            caps.clone(),
+        );
+        assert_eq!(fixed, caps);
+        let descriptor = tensor_caps(&info.outputs()[0]);
+        let dims = descriptor
+            .structure(0)
+            .expect("tensor caps")
+            .get::<gst::Array>("dims")
+            .expect("dimensions");
+        assert_eq!(
+            dims.iter()
+                .map(|dim| dim.get::<i32>().expect("axis"))
+                .collect::<Vec<_>>(),
+            [0, 1, 0, 3]
+        );
+        let mut concrete = info.outputs()[0].clone();
+        concrete.dims = vec![1, 1, 2, 3];
+        // Zero is the tensor protocol's unknown marker, not a GStreamer integer
+        // range: consumers requiring fixed dimensions must reject this contract.
+        assert!(!descriptor.can_intersect(&tensor_caps(&concrete)));
+    }
 
     #[test]
     fn maps_every_supported_output_scalar_to_gstreamer_128() {
