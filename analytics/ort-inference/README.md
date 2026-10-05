@@ -5,7 +5,7 @@ uses ONNX Runtime and publishes the model outputs model-info declares, in
 model-info order, through the shared `tensor/strided` caps and `GstTensorMeta`
 contract. Carrier buffers pass through unchanged. The shared
 [model-info contract](../inference-common/README.md#model-info-contract) covers
-output subsets and dimensions that bind the model's dynamic dimensions.
+output subsets, fixed dimensions, and wildcard dimensions.
 
 `input-mode=video` is the default. Set `input-mode=tensor-meta` to consume
 one or more tensors prepared upstream in `GstTensorMeta`, with the
@@ -20,6 +20,8 @@ both modes; `model-channel-order` affects only video mode. Input mode is
 explicit: existing tensor metadata never changes how video mode processes
 pixels. Tensor mode does not read the carrier's payload as model input.
 
+Tensor mode supports `-1` wildcard dimensions in model-info, including outputs
+whose sizes depend on input values. Each buffer carries concrete tensor shapes.
 Tensor inputs and outputs may have non-unit leading dimensions. Batch-one
 image rules apply only to video input. See the shared [model-info contract](../inference-common/README.md#model-info-contract)
 for shape and layout requirements and [compatibility](../inference-common/README.md#compatibility)
@@ -179,9 +181,9 @@ cargo run -p gst-plugin-ort-inference --example model_info -- \
 
 Usage: `model_info MODEL.onnx [MODEL.modelinfo video|tensor-meta]`.
 Use `video` to check the image input profile. Dimension names are
-symbolic; `?` means an unnamed unknown dimension. These plugins currently need
-fixed positive sizes in model-info; upstream `-1` wildcards are not yet
-supported. Unsupported types and shapes are annotated.
+symbolic; `?` means an unnamed unknown dimension. Bind these to positive sizes
+in model-info, or use `-1` wildcards in tensor-meta mode. Unsupported types
+and shapes are annotated.
 
 With model-info, the example prints `Startup check: PASS` or exits nonzero
 with the failure details. Without it, the contract is `NOT CHECKED`. PASS only

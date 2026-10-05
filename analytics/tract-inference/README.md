@@ -80,7 +80,9 @@ for upstream tensor selection, caps, errors, and model chaining.
 `input-mode` is mutable in NULL or READY. Provider selection applies to both
 input modes; `model-channel-order` applies only to video mode.
 
-Tensor inputs and outputs may have non-unit leading dimensions. Batch-one
-image rules apply only to video input. See the shared [compatibility notes](../inference-common/README.md#compatibility)
+Tract requires concrete model-info dimensions; wildcard declarations are
+rejected at startup. Tensor inputs and outputs may have non-unit leading
+dimensions. Batch-one image rules apply only to video input. See the shared
+[compatibility notes](../inference-common/README.md#compatibility)
 for the scope of the fixture tests. ORT's inspection example does not validate
 Tract graph support.

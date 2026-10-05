@@ -69,24 +69,32 @@ video structure and add a `tensors` group keyed by `group-id`; each
 `tensor/strided` descriptor contains the declared dimensions, order, type, and
 tensor ID. Each declared output becomes a separate buffer in `GstTensorMeta`.
 
-Upstream model-info permits `-1` as a wildcard for a dynamic dimension.
-These plugins do not yet support that notation in `.modelinfo`: each axis
-must have a concrete positive size, including axes that are symbolic in the
-ONNX model. This is an implementation limitation, not a format restriction.
-Declared sizes bind symbolic model dimensions; fixed model dimensions must
-match. A model may have more outputs than model-info declares; only declared
+Model-info permits `-1` as a wildcard dimension. ORT supports it for inputs
+and outputs in `input-mode=tensor-meta`: input sizes come from each buffer's
+tensors, and output sizes come from inference results. Actual dimensions must
+match fixed axes in both model-info and the ONNX model. Repeated ONNX dimension
+symbols must agree across inputs. Video mode and Tract still require concrete dimensions.
+Declared sizes can bind symbolic model dimensions in either backend.
+A model may have more outputs than model-info declares; only declared
 outputs are requested and attached.
+
+For wildcard output axes, tensor caps use GStreamer's `0` marker for an
+unknown size; each `GstTensorMeta` carries the actual positive dimensions.
+Caps stay stable as shapes change. Downstream consumers must accept unknown
+sizes and read dimensions from tensor metadata; a fixed-size caps requirement
+is not compatible with a wildcard output declaration.
 
 Fixed constants belong in the model graph as initializers. Additional runtime
 inputs must be supplied upstream in tensor-input mode. Unknown model-info
 fields are ignored, as upstream specifies.
 
 Every model input must be declared, and model-info must not declare tensors
-the model lacks. Shapes must be fixed, nonempty, and positive, and tensor sizes
-must fit platform limits. Rank-zero scalars, zero-length axes, per-buffer shape
-changes, and runtime shape/type mismatches are unsupported. Generic inputs and
-all outputs may have shapes such as `[6]`, `[2,3]`, or `[2,1,128]`; their first
-axis need not represent a batch. Only the video image input requires batch one.
+the model lacks. Actual shapes must be nonempty and positive, and tensor sizes
+must fit platform limits. Rank-zero scalars, zero-length axes (including empty
+inference outputs), and runtime shape/type mismatches are unsupported. Generic
+inputs and all outputs may have shapes such as `[6]`, `[2,3]`, or `[2,1,128]`.
+Their first axis need not represent a batch. Only the video image input
+requires batch one.
 
 In video mode, `dims-order` accepts `row-major` (the default) or `col-major`.
 The declared order is copied into output caps and `GstTensorMeta`; model bytes
@@ -131,12 +139,11 @@ match. Per-object classification after detection additionally needs crop
 preprocessing, repeated execution or batching, and association of each output
 with its object. That workflow is not implemented by input selection alone.
 
-The model-info file is the same format without the image rules: one or more
-inputs of any supported type and dimensions that bind the model's symbolic
-dimensions. Inputs are already preprocessed, so `ranges` is unused in this
-mode. All tensors use row-major dimension order and fixed shapes; the first
-axis need not be one. One complete input set causes one invocation, with no
-automatic batching across carriers or recurrent-state feedback.
+The model-info file uses the same format without the image rules. Inputs are
+already preprocessed, so `ranges` is unused. All tensors use row-major dimension
+order, with fixed or wildcard dimensions as described above. One complete input
+set causes one invocation, with no automatic batching across carriers or
+recurrent-state feedback.
 
 ```ini
 [modelinfo]
@@ -174,7 +181,8 @@ Successful startup does not prove inference or task correctness, and ORT and
 Tract may support different graphs.
 
 - **Fixture-tested:** CPU inference, numerical parity, caps, metadata, input
-  selection, and carrier preservation. See [fixture provenance](tests/fixtures/PROVENANCE.md).
+  selection, and carrier preservation; ORT also covers wildcard dimensions and
+  data-dependent output sizes. See [fixture provenance](tests/fixtures/PROVENANCE.md).
 - **Real-model recipes:** none documented here. A recipe should pin its model
   and auxiliary assets, describe preprocessing and decoding, and record a
   reproduced result.
