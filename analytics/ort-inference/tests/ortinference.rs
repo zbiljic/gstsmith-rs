@@ -76,6 +76,54 @@ fn init() {
     });
 }
 
+#[test]
+fn video_preserves_modelinfo_10_dimension_order_annotations() {
+    for factory in ["ortinference", "tractinference"] {
+        let (element, directory) = fixture_element(factory).expect("fixture element");
+        fs::write(
+            directory.path().join("identity.onnx.modelinfo"),
+            MODEL_INFO
+                .replace("dir=input", "dir=input\ndims-order=col-major")
+                .replace("dir=output", "dir=output\ndims-order=col-major"),
+        )
+        .expect("model-info 1.0 column-major annotations");
+        let mut h = gst_check::Harness::with_element(&element, Some("sink"), Some("src"));
+        h.set_src_caps(caps());
+        h.play();
+        let output = h.push_and_pull(input_buffer(&caps())).expect("inference");
+        let meta = output.meta::<gst_analytics::TensorMeta>().expect("outputs");
+        assert_eq!(meta.as_slice().len(), 2);
+        for tensor in meta.as_slice() {
+            assert_eq!(tensor.dims(), [1, 1, 2, 3]);
+            assert_eq!(tensor.dims_order(), gst_analytics::TensorDimOrder::ColMajor);
+            // Match upstream onnxinference: dims-order is an output
+            // annotation, not an instruction to transpose the model's bytes.
+            assert_eq!(tensor_values(tensor), [1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
+        }
+        let output_caps = h.sinkpad().expect("sink pad").current_caps().expect("caps");
+        let groups = output_caps
+            .structure(0)
+            .expect("structure")
+            .get::<gst::Structure>("tensors")
+            .expect("groups");
+        let descriptors = groups
+            .get::<gst::UniqueList>("gstsmith-identity-fixture")
+            .expect("descriptors");
+        assert_eq!(descriptors.len(), 2);
+        for descriptor in descriptors.iter() {
+            let descriptor = descriptor.get::<gst::Caps>().expect("tensor caps");
+            assert_eq!(
+                descriptor
+                    .structure(0)
+                    .expect("tensor structure")
+                    .get::<String>("dims-order")
+                    .expect("order"),
+                "col-major"
+            );
+        }
+    }
+}
+
 fn fixture_element(
     factory: &str,
 ) -> Result<(gst::Element, tempfile::TempDir), Box<dyn std::error::Error>> {

@@ -344,6 +344,17 @@ fn partial_or_mismatched_inputs_are_errors() {
             vec![sequence(&[1, 3, 2]), mask()],
             vec![sequence(&[1, 2, 2]), mask(), scale(2.0)],
             vec![
+                gst_analytics::Tensor::new_simple(
+                    gst::glib::Quark::from_str("sequence"),
+                    gst_analytics::TensorDataType::Float32,
+                    gst::Buffer::from_mut_slice(vec![0_u8; 24]),
+                    gst_analytics::TensorDimOrder::ColMajor,
+                    &[1, 3, 2],
+                ),
+                mask(),
+                scale(2.0),
+            ],
+            vec![
                 tensor(
                     "sequence",
                     gst_analytics::TensorDataType::Int32,
@@ -359,6 +370,27 @@ fn partial_or_mismatched_inputs_are_errors() {
                 h.push(buffer(tensors)),
                 Err(gst::FlowError::Error),
                 "{factory}"
+            );
+        }
+    }
+}
+
+#[test]
+fn input_byte_size_must_match_exactly() {
+    for factory in FACTORIES {
+        for size in [20, 28] {
+            let (mut h, _directory) = harness(factory);
+            let mut input = sequence(&[1, 3, 2]);
+            // The native constructor rejects wrong sizes; simulate an upstream
+            // producer changing the data buffer after tensor construction.
+            input.data_mut().remove_all_memory();
+            input
+                .data_mut()
+                .append_memory(gst::Memory::from_mut_slice(vec![0_u8; size]));
+            assert_eq!(
+                h.push(buffer(vec![input, mask(), scale(2.0)])),
+                Err(gst::FlowError::Error),
+                "{factory}, size={size}"
             );
         }
     }
