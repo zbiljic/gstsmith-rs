@@ -23,24 +23,136 @@ fn init() {
 }
 
 fn harness(factory: &str) -> (gst_check::Harness, tempfile::TempDir) {
+    fixture_harness(factory, MODEL, MODEL_INFO, "tensor-meta")
+}
+
+fn fixture_harness(
+    factory: &str,
+    model_bytes: &[u8],
+    model_info: &str,
+    mode: &str,
+) -> (gst_check::Harness, tempfile::TempDir) {
     init();
     let directory = tempfile::tempdir().expect("creating fixture directory");
-    let model = directory.path().join("masked-sequence.onnx");
-    fs::write(&model, MODEL).expect("writing fixture model");
-    fs::write(
-        directory.path().join("masked-sequence.onnx.modelinfo"),
-        MODEL_INFO,
-    )
-    .expect("writing fixture model-info");
+    let model = directory.path().join("fixture.onnx");
+    fs::write(&model, model_bytes).expect("writing fixture model");
+    fs::write(directory.path().join("fixture.onnx.modelinfo"), model_info)
+        .expect("writing fixture model-info");
     let element = gst::ElementFactory::make(factory)
         .property("model-file", model.to_string_lossy().as_ref())
-        .property_from_str("input-mode", "tensor-meta")
+        .property_from_str("input-mode", mode)
         .build()
         .expect("creating tensor inference element");
     let mut harness = gst_check::Harness::with_element(&element, Some("sink"), Some("src"));
-    harness.set_src_caps(gst::Caps::new_empty_simple("application/x-test"));
+    if mode == "video" {
+        harness.set_src_caps_str("video/x-raw,format=RGB,width=2,height=1,framerate=1/1");
+    } else {
+        harness.set_src_caps(gst::Caps::new_empty_simple("application/x-test"));
+    }
     harness.play();
     (harness, directory)
+}
+
+fn assert_axis_contract(
+    h: &gst_check::Harness,
+    output: &gst::BufferRef,
+    contract: gst_inference_common::model_info::CapsContract<'_>,
+) {
+    let caps = h.sinkpad().expect("sink pad").current_caps().expect("caps");
+    let groups = caps
+        .structure(0)
+        .expect("structure")
+        .get::<gst::Structure>("tensors")
+        .expect("tensor groups");
+    let descriptors = groups
+        .get::<gst::UniqueList>(contract.group_id)
+        .expect("descriptors");
+    assert_eq!(descriptors.len(), contract.outputs.len());
+    for (description, caps) in contract.outputs.iter().zip(descriptors.iter()) {
+        let caps = caps.get::<gst::Caps>().expect("tensor caps");
+        let structure = caps.structure(0).expect("tensor structure");
+        assert_eq!(
+            structure.get::<String>("tensor-id").expect("id"),
+            description.id
+        );
+        assert_eq!(structure.get::<String>("type").expect("type"), "float32");
+        assert_eq!(
+            structure.get::<String>("dims-order").expect("order"),
+            "row-major"
+        );
+        let dims = structure.get::<gst::Array>("dims").expect("dims");
+        let dims = dims
+            .iter()
+            .map(|v| {
+                usize::try_from(v.get::<i32>().expect("dimension")).expect("positive dimension")
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(dims, description.dims);
+        let tensor = output
+            .iter_meta::<gst_analytics::TensorMeta>()
+            .flat_map(|meta| meta.as_slice().to_vec())
+            .find(|tensor| tensor.id().as_str() == description.id.as_str())
+            .expect("output tensor");
+        assert_eq!(tensor.dims(), description.dims);
+        assert_eq!(tensor.data_type(), gst_analytics::TensorDataType::Float32);
+        assert_eq!(tensor.dims_order(), gst_analytics::TensorDimOrder::RowMajor);
+        let expected = (1..=description.dims.iter().product::<usize>())
+            .map(|v| f32::from(u16::try_from(v).expect("small fixture")))
+            .collect::<Vec<_>>();
+        assert_eq!(float_values(output, &description.id), expected);
+    }
+}
+
+#[test]
+fn non_unit_leading_axes_survive_tensor_inference() {
+    use gst_inference_common::model_info::TensorModelInfo;
+    let contents = include_str!("../../inference-common/tests/fixtures/tensor-axes.onnx.modelinfo");
+    let info = TensorModelInfo::parse(contents).expect("arbitrary axes parse");
+    for factory in FACTORIES {
+        let (mut h, _directory) = fixture_harness(
+            factory,
+            include_bytes!("../../inference-common/tests/fixtures/tensor-axes.onnx"),
+            contents,
+            "tensor-meta",
+        );
+        let inputs = info
+            .inputs()
+            .iter()
+            .rev()
+            .map(|input| {
+                let bytes = (1..=input.dims.iter().product::<usize>())
+                    .flat_map(|v| f32::from(u16::try_from(v).expect("small fixture")).to_le_bytes())
+                    .collect();
+                tensor(
+                    &input.id,
+                    gst_analytics::TensorDataType::Float32,
+                    &input.dims,
+                    bytes,
+                )
+            })
+            .collect();
+        let output = h.push_and_pull(buffer(inputs)).expect("tensor inference");
+        assert_axis_contract(&h, &output, info.caps_contract());
+    }
+}
+
+#[test]
+fn video_outputs_have_arbitrary_axes_and_truthful_memory_order() {
+    use gst_inference_common::model_info::ModelInfo;
+    let contents =
+        include_str!("../../inference-common/tests/fixtures/image-reshape.onnx.modelinfo");
+    let info = ModelInfo::parse(contents).expect("unbatched outputs parse");
+    for factory in FACTORIES {
+        let (mut h, _directory) = fixture_harness(
+            factory,
+            include_bytes!("../../inference-common/tests/fixtures/image-reshape.onnx"),
+            contents,
+            "video",
+        );
+        let input = gst::Buffer::from_mut_slice(vec![1_u8, 2, 3, 4, 5, 6, 0, 0]);
+        let output = h.push_and_pull(input).expect("video inference");
+        assert_axis_contract(&h, &output, info.caps_contract());
+    }
 }
 
 fn tensor(

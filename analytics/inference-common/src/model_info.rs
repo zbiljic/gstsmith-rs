@@ -299,11 +299,6 @@ fn parse_tensor(section: &Section, kind: ModelKind) -> Result<ParsedTensor, Stri
     };
     let id = non_empty(require(section, "id", name)?, "id")?.to_owned();
     let dims = parse_dims(require(section, "dims", name)?)?;
-    if dims.first() != Some(&1) {
-        return Err(format!(
-            "tensor {name:?} must have a static batch dimension of one"
-        ));
-    }
     let data_type = ScalarType::parse(require(section, "type", name)?)?;
     dims.iter()
         .try_fold(data_type.size(), |size, dimension| {
@@ -502,6 +497,12 @@ pub fn image_layout(dims: &[usize]) -> Option<ImageLayout> {
 }
 
 fn validate_image_input(input: &TensorDescription) -> Result<(), String> {
+    if input.dims.first() != Some(&1) {
+        return Err(format!(
+            "image input {:?} must have a static batch dimension of one",
+            input.name
+        ));
+    }
     if image_layout(&input.dims).is_none() {
         return Err(
             "input dimensions must be unit leading dimensions followed by an unambiguous 3,H,W or H,W,3 image"
@@ -642,7 +643,10 @@ mod tests {
     #[test]
     fn rejects_invalid_tensor_models() {
         for invalid in [
-            TENSOR_MODEL.replace("dims=1,400,768", "dims=2,400,768"),
+            TENSOR_MODEL.replace("dims=1,400,768", "dims="),
+            TENSOR_MODEL.replace("dims=1,400,768", "dims=0,400,768"),
+            TENSOR_MODEL.replace("dims=1,400,768", "dims=-1,400,768"),
+            TENSOR_MODEL.replace("dims=1,400,768", "dims=2147483648"),
             TENSOR_MODEL.replace("dims=1,400,768", "dims=1,2147483647,2147483647,2147483647"),
             TENSOR_MODEL.replace("dims=1,400,768", "dims=1,2147483647,2147483647"),
             TENSOR_MODEL.replacen("dir=input", "dir=input\ndims-order=col-major", 1),
@@ -674,6 +678,10 @@ mod tests {
             VALID.replace("group-id=test-group", "group-id="),
             VALID.replace("dir=input", "dir=sideways"),
             VALID.replace("dims=1,18", "dims=1,-1"),
+            VALID.replacen("dims=1,2,3,3", "dims=2,2,3,3", 1),
+            VALID.replacen("dims=1,2,3,3", "dims=1,3,2,3", 1),
+            VALID.replacen("dims=1,2,3,3", "dims=2,3,3", 1),
+            VALID.replace("dims-order=col-major", "dims-order=unknown"),
             VALID.replace("id=second-output", "id=first-output"),
             VALID.replace("ranges=0,255;0,255;0,255", "ranges=0,1;0,1"),
         ] {
