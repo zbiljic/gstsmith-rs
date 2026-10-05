@@ -9,6 +9,7 @@ SHARED = (
     ":(glob)**/Cargo.toml",
     "Cargo.lock",
     "mise.toml",
+    "ruff.toml",
     "rust-toolchain",
     "rust-toolchain.toml",
     ".cargo",
@@ -35,7 +36,7 @@ GSTREAMER_128_CRATES = (
 CRATES = (*GSTREAMER_124_CRATES, *GSTREAMER_128_CRATES)
 SCOPES = {
     "rust": CRATES,
-    "format": (":(glob)**/*.rs", "rustfmt.toml", ".rustfmt.toml"),
+    "format": (":(glob)**/*.rs", ":(glob)**/*.py", "rustfmt.toml", ".rustfmt.toml"),
     "deps": ("deny.toml",),
     "sort": (":(glob)**/Cargo.toml",),
     "packaging": (

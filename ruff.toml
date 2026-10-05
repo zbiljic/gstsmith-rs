@@ -1,0 +1,6 @@
+target-version = "py312"
+# Keep linting deterministic regardless of a developer's global gitignore.
+respect-gitignore = false
+
+[lint]
+extend-select = ["I", "N", "UP", "B", "SIM", "RUF"]

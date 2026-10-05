@@ -1,0 +1,15 @@
+[tasks."python:fmt"]
+description = "Format Python scripts"
+run = "ruff format ci analytics/inference-common/tests/fixtures"
+
+[tasks."python:fmt:check"]
+description = "Check that Python scripts are formatted"
+run = "ruff format --check ci analytics/inference-common/tests/fixtures"
+
+[tasks."python:lint:ruff"]
+description = "Lint Python scripts with Ruff"
+run = "ruff check ci analytics/inference-common/tests/fixtures"
+
+[tasks."python:lint-fix"]
+description = "Lint and autofix Python scripts with Ruff"
+run = "ruff check --fix ci analytics/inference-common/tests/fixtures"

@@ -15,3 +15,10 @@ target
 
 # rustc will dump stack traces when hitting an internal compiler error to PWD
 rustc-ice-*.txt
+
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[codz]
+
+# Ruff stuff:
+.ruff_cache/
