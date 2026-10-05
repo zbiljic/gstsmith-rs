@@ -157,7 +157,7 @@ struct CachedQueue {
     labels: ElementLabels,
 }
 
-// ponytail: one dirty flag rebuilds all queue identities after any graph edit.
+// One dirty flag rebuilds all queue identities after any graph edit.
 // Use per-pipeline invalidation only if rebuilds across independent pipelines matter.
 #[derive(Default)]
 struct QueueCache {
