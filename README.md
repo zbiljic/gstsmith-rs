@@ -68,6 +68,9 @@ and elements written in Rust.
     - `statsd`: Observe pipelines through tracer hooks and periodically emit
       StatsD counters and gauges.
 
+See the [combined tracing example](examples/tracing/README.md) for opt-in
+arrival-interval histograms, native latency tracing, and queue occupancy history.
+
 ## Building
 
 Building the full workspace requires GStreamer 1.28 or newer because the

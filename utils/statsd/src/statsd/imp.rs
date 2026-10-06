@@ -55,6 +55,7 @@ struct Settings {
     include_filter: Option<String>,
     exclude_filter: Option<String>,
     max_pad_series: u32,
+    track_intervals: bool,
 }
 
 impl Default for Settings {
@@ -67,6 +68,7 @@ impl Default for Settings {
             include_filter: None,
             exclude_filter: None,
             max_pad_series: 256,
+            track_intervals: false,
         }
     }
 }
@@ -133,6 +135,12 @@ impl ObjectImpl for StatsdTracer {
                     .blurb("Optional regular expression excluding raw metric scopes")
                     .construct()
                     .build(),
+                glib::ParamSpecBoolean::builder("track-intervals")
+                    .nick("Track push intervals")
+                    .blurb("Collect a bounded histogram of time between pad push attempts")
+                    .default_value(false)
+                    .construct()
+                    .build(),
                 glib::ParamSpecUInt::builder("max-pad-series")
                     .nick("Maximum pad series")
                     .blurb("Maximum number of active pad label sets")
@@ -167,6 +175,11 @@ impl ObjectImpl for StatsdTracer {
         }
         let mut settings = self.settings.lock();
         match pspec.name() {
+            "track-intervals" => {
+                if let Ok(value) = value.get::<bool>() {
+                    settings.track_intervals = value;
+                }
+            }
             "destination" => set_string(value, &mut settings.destination),
             "prefix" => set_string(value, &mut settings.prefix),
             "global-tags" => set_optional_string(value, &mut settings.global_tags),
@@ -180,6 +193,7 @@ impl ObjectImpl for StatsdTracer {
 
     fn property(&self, _id: usize, pspec: &glib::ParamSpec) -> glib::Value {
         match pspec.name() {
+            "track-intervals" => self.settings.lock().track_intervals.to_value(),
             "destination" => self.settings.lock().destination.to_value(),
             "prefix" => self.settings.lock().prefix.to_value(),
             "global-tags" => self.settings.lock().global_tags.to_value(),
@@ -225,7 +239,12 @@ impl ObjectImpl for StatsdTracer {
                 return;
             }
         };
-        let (metrics, retired) = Metrics::new(include, exclude, settings.max_pad_series as usize);
+        let (metrics, retired) = Metrics::new(
+            include,
+            exclude,
+            settings.max_pad_series as usize,
+            settings.track_intervals,
+        );
         let worker = match worker::start(config, Arc::clone(&metrics), retired) {
             Ok(worker) => worker,
             Err(error) => {
@@ -260,6 +279,10 @@ impl ObjectImpl for StatsdTracer {
         self.register_hook(TracerHook::ElementChangeStatePost);
         self.register_hook(TracerHook::PadPushPre);
         self.register_hook(TracerHook::PadPushListPre);
+        if settings.track_intervals {
+            self.register_hook(TracerHook::PadPushEventPre);
+            self.register_hook(TracerHook::ElementChangeStatePre);
+        }
     }
 
     fn dispose(&self) {
@@ -320,13 +343,36 @@ impl TracerImpl for StatsdTracer {
         }
     }
 
+    fn pad_push_event_pre(&self, ts: u64, pad: &gst::Pad, event: &gst::Event) {
+        if matches!(
+            event.type_(),
+            gst::EventType::FlushStart
+                | gst::EventType::FlushStop
+                | gst::EventType::StreamStart
+                | gst::EventType::Segment
+                | gst::EventType::Eos
+        ) && let Some(metrics) = self.metrics.get()
+        {
+            metrics.reset_pad_interval(pad, ts);
+        }
+    }
+
+    fn element_change_state_pre(&self, ts: u64, element: &gst::Element, _change: gst::StateChange) {
+        if let Some(metrics) = self.metrics.get() {
+            metrics.reset_element_intervals(element, ts);
+        }
+    }
+
     fn element_change_state_post(
         &self,
-        _ts: u64,
+        ts: u64,
         element: &gst::Element,
         _change: gst::StateChange,
         result: Result<gst::StateChangeSuccess, gst::StateChangeError>,
     ) {
+        if let Some(metrics) = self.metrics.get() {
+            metrics.reset_element_intervals(element, ts);
+        }
         if result.is_err() {
             return;
         }
@@ -337,18 +383,18 @@ impl TracerImpl for StatsdTracer {
         }
     }
 
-    fn pad_push_pre(&self, _ts: u64, pad: &gst::Pad, buffer: &gst::Buffer) {
+    fn pad_push_pre(&self, ts: u64, pad: &gst::Pad, buffer: &gst::Buffer) {
         self.metrics
-            .record_push(pad, 1, u64::try_from(buffer.size()).unwrap_or(u64::MAX));
+            .record_push(pad, 1, u64::try_from(buffer.size()).unwrap_or(u64::MAX), ts);
     }
 
-    fn pad_push_list_pre(&self, _ts: u64, pad: &gst::Pad, list: &gst::BufferList) {
+    fn pad_push_list_pre(&self, ts: u64, pad: &gst::Pad, list: &gst::BufferList) {
         let buffers = u64::try_from(list.len()).unwrap_or(u64::MAX);
         let bytes = list
             .iter()
             .map(|buffer| u64::try_from(buffer.size()).unwrap_or(u64::MAX))
             .fold(0_u64, u64::saturating_add);
-        self.metrics.record_push(pad, buffers, bytes);
+        self.metrics.record_push(pad, buffers, bytes, ts);
     }
 }
 
@@ -473,6 +519,91 @@ mod tests {
     use super::*;
 
     static TRACER_TEST_LOCK: Mutex<()> = Mutex::new(());
+
+    #[test]
+    fn interval_hooks_handle_lists_resets_bounds_and_removal() {
+        let _guard = TRACER_TEST_LOCK.lock();
+        gst::init().expect("initializing GStreamer");
+        let tracer = glib::Object::builder::<super::super::StatsdTracer>()
+            .property("destination", "127.0.0.1:9")
+            .property("track-intervals", true)
+            .property("max-pad-series", 1_u32)
+            .property("include-filter", "interval_")
+            .build();
+        let imp = tracer.imp();
+        let metrics = imp.metrics.get().expect("active metrics");
+        let element = gst::ElementFactory::make("identity")
+            .name("interval_observed")
+            .build()
+            .expect("identity");
+        let pad = element.static_pad("src").expect("source pad");
+        let other = gst::ElementFactory::make("identity")
+            .name("interval_capped")
+            .build()
+            .expect("second identity");
+        let other_pad = other.static_pad("src").expect("second source pad");
+        let buffer = gst::Buffer::new();
+        let mut list = gst::BufferList::new();
+        for _ in 0..3 {
+            list.make_mut().add(gst::Buffer::new());
+        }
+        // Four attempts, six buffers, three intervals: 1 ms, 5 ms, and 2 s.
+        imp.pad_push_pre(0, &pad, &buffer);
+        imp.pad_push_list_pre(1_000_000, &pad, &list);
+        imp.pad_push_pre(6_000_000, &pad, &buffer);
+        imp.pad_push_pre(2_006_000_000, &pad, &buffer);
+        // An older concurrent timestamp must not move the baseline backwards.
+        imp.pad_push_pre(5_000_000, &pad, &buffer);
+        imp.pad_push_pre(0, &other_pad, &buffer);
+        imp.pad_push_pre(1_000_000, &other_pad, &buffer);
+        // Every discontinuity keeps the accumulated histogram, but clears its baseline.
+        for (index, event) in [
+            gst::event::FlushStart::new(),
+            gst::event::FlushStop::new(false),
+            gst::event::StreamStart::new("replacement"),
+            gst::event::Segment::new(&gst::FormattedSegment::<gst::ClockTime>::new()),
+            gst::event::Eos::new(),
+        ]
+        .iter()
+        .enumerate()
+        {
+            let ts = 10_000_000_000 * (u64::try_from(index).expect("small index") + 1);
+            imp.pad_push_event_pre(ts, &pad, event);
+            imp.pad_push_pre(ts - 1, &pad, &buffer); // Stale hook after the reset.
+            imp.pad_push_pre(ts + 1_000_000_000, &pad, &buffer);
+        }
+        imp.element_change_state_pre(60_000_000_000, &element, gst::StateChange::PlayingToPaused);
+        imp.pad_push_pre(61_000_000_000, &pad, &buffer);
+        imp.element_change_state_post(
+            62_000_000_000,
+            &element,
+            gst::StateChange::PausedToPlaying,
+            Ok(gst::StateChangeSuccess::Success),
+        );
+        imp.pad_push_pre(63_000_000_000, &pad, &buffer);
+        // Late reset hooks must preserve an arrival observed after their timestamp.
+        imp.pad_push_event_pre(61_500_000_000, &pad, &gst::event::FlushStop::new(false));
+        imp.pad_push_pre(62_500_000_000, &pad, &buffer);
+        imp.element_change_state_pre(62_750_000_000, &element, gst::StateChange::PausedToPlaying);
+        // Resetting a different element must preserve this pad's baseline.
+        imp.element_change_state_pre(63_000_500_000, &other, gst::StateChange::PlayingToPaused);
+        imp.pad_push_pre(63_001_000_000, &pad, &buffer);
+        let pads = metrics.active_pads();
+        assert_eq!(pads.len(), 1);
+        let stats = pads.first().expect("tracked pad");
+        let snapshot = *stats
+            .interval
+            .as_ref()
+            .expect("enabled histogram")
+            .data
+            .lock();
+        assert_eq!(snapshot.count, 4);
+        assert_eq!(snapshot.sum_ns, 2_007_000_000);
+        assert_eq!(snapshot.buckets, [2, 3, 3, 3, 3, 3, 3, 3, 4]);
+        imp.element_remove_pad(64_000_000_000, &element, &pad);
+        assert!(metrics.active_pads().is_empty());
+        imp.dispose();
+    }
 
     #[test]
     fn tracer_queue_cache_follows_bin_hooks_and_renames() {

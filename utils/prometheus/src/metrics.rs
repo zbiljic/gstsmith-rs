@@ -13,6 +13,7 @@ use prometheus_client::encoding::{
 use prometheus_client::metrics::counter::Counter;
 use prometheus_client::metrics::family::Family;
 use prometheus_client::metrics::gauge::Gauge;
+use prometheus_client::metrics::histogram::Histogram;
 use prometheus_client::registry::Registry;
 use regex::Regex;
 
@@ -66,6 +67,61 @@ struct TrackedPad {
     labels: PadLabels,
     buffers: Counter,
     bytes: Counter,
+    interval: Option<Arc<PadInterval>>,
+}
+
+struct PadInterval {
+    owner: usize,
+    timing: Mutex<IntervalTiming>,
+    histogram: Histogram,
+}
+
+#[derive(Default)]
+struct IntervalTiming {
+    reset_at: u64,
+    last: Option<u64>,
+}
+
+impl PadInterval {
+    fn reset(&self, timestamp: u64) {
+        let mut timing = self.timing.lock();
+        timing.reset_at = timing.reset_at.max(timestamp);
+        if timing.last.is_some_and(|last| last <= timing.reset_at) {
+            timing.last = None;
+        }
+    }
+
+    fn observe(&self, timestamp: u64) {
+        let mut timing = self.timing.lock();
+        if timestamp < timing.reset_at {
+            return;
+        }
+        if let Some(previous) = timing.last {
+            let Some(interval) = timestamp.checked_sub(previous) else {
+                // Concurrent hooks can reach this lock out of timestamp order.
+                return;
+            };
+            self.histogram
+                .observe(std::time::Duration::from_nanos(interval).as_secs_f64());
+        }
+        timing.last = Some(timestamp);
+    }
+}
+
+fn interval_histogram() -> Histogram {
+    Histogram::new([0.001, 0.005, 0.01, 0.02, 0.04, 0.1, 0.25, 1.0])
+}
+
+type IntervalFamily = Family<PadLabels, Histogram, fn() -> Histogram>;
+
+fn register_interval_histograms(registry: &mut Registry) -> IntervalFamily {
+    let family = Family::new_with_constructor(interval_histogram as fn() -> Histogram);
+    registry.register(
+        "gstsmith_gstreamer_pad_push_interval_seconds",
+        "Time between consecutive buffer or buffer-list push attempts on a pad",
+        family.clone(),
+    );
+    family
 }
 
 #[derive(Clone)]
@@ -207,6 +263,7 @@ pub(crate) struct Metrics {
     registry: Mutex<Registry>,
     pad_buffers: Family<PadLabels, Counter>,
     pad_bytes: Family<PadLabels, Counter>,
+    pad_intervals: Option<IntervalFamily>,
     pipeline_state: Family<PipelineLabels, Gauge>,
     queue_level_buffers: Family<ElementLabels, Gauge>,
     queue_level_bytes: Family<ElementLabels, Gauge>,
@@ -244,9 +301,9 @@ impl MetricsSlot {
         self.0.get().map(Arc::as_ref)
     }
 
-    pub(crate) fn record_push(&self, pad: &gst::Pad, buffers: u64, bytes: u64) {
+    pub(crate) fn record_push(&self, pad: &gst::Pad, buffers: u64, bytes: u64, timestamp: u64) {
         if let Some(metrics) = self.get() {
-            metrics.update_pad(pad, buffers, bytes);
+            metrics.update_pad(pad, buffers, bytes, timestamp);
         }
     }
 }
@@ -256,6 +313,7 @@ impl Metrics {
         include_filter: Option<Regex>,
         exclude_filter: Option<Regex>,
         max_pad_series: usize,
+        track_intervals: bool,
     ) -> Arc<Self> {
         let pad_buffers = Family::default();
         let pad_bytes = Family::default();
@@ -274,6 +332,8 @@ impl Metrics {
             .clone();
         let encoding_failures = Counter::default();
         let mut registry = Registry::default();
+
+        let pad_intervals = track_intervals.then(|| register_interval_histograms(&mut registry));
 
         registry.register(
             "gstsmith_gstreamer_pad_push_buffers",
@@ -335,6 +395,7 @@ impl Metrics {
             registry: Mutex::new(registry),
             pad_buffers,
             pad_bytes,
+            pad_intervals,
             pipeline_state,
             queue_level_buffers,
             queue_level_bytes,
@@ -369,11 +430,17 @@ impl Metrics {
                 .is_none_or(|filter| !filter.is_match(identity))
     }
 
-    pub(crate) fn update_pad(&self, pad: &gst::Pad, buffers: u64, bytes: u64) {
+    pub(crate) fn update_pad(&self, pad: &gst::Pad, buffers: u64, bytes: u64, timestamp: u64) {
         let key = pad.as_ptr() as usize;
         let pads = self.pads.pin();
         if let Some(entry) = pads.get(&key) {
-            Self::increment_entry(entry, buffers, bytes, &self.untracked_series_limit);
+            Self::increment_entry(
+                entry,
+                buffers,
+                bytes,
+                timestamp,
+                &self.untracked_series_limit,
+            );
             return;
         }
         drop(pads);
@@ -395,7 +462,13 @@ impl Metrics {
         let mut tracked_pad_count = self.tracked_pad_count.lock();
         let pads = self.pads.pin();
         if let Some(entry) = pads.get(&key) {
-            Self::increment_entry(entry, buffers, bytes, &self.untracked_series_limit);
+            Self::increment_entry(
+                entry,
+                buffers,
+                bytes,
+                timestamp,
+                &self.untracked_series_limit,
+            );
             return;
         }
         let entry = if !included || *tracked_pad_count >= self.max_pad_series {
@@ -409,23 +482,40 @@ impl Metrics {
             PadEntry::Tracked(TrackedPad {
                 buffers: self.pad_buffers.get_or_create(&labels).clone(),
                 bytes: self.pad_bytes.get_or_create(&labels).clone(),
+                interval: self.pad_intervals.as_ref().map(|family| {
+                    Arc::new(PadInterval {
+                        owner: element.as_ptr() as usize,
+                        timing: Mutex::default(),
+                        histogram: family.get_or_create(&labels).clone(),
+                    })
+                }),
                 labels,
             })
         };
         let entry = pads.get_or_insert(key, entry);
-        Self::increment_entry(entry, buffers, bytes, &self.untracked_series_limit);
+        Self::increment_entry(
+            entry,
+            buffers,
+            bytes,
+            timestamp,
+            &self.untracked_series_limit,
+        );
     }
 
     fn increment_entry(
         entry: &PadEntry,
         buffers: u64,
         bytes: u64,
+        timestamp: u64,
         untracked_series_limit: &Counter,
     ) {
         match entry {
             PadEntry::Tracked(entry) => {
                 entry.buffers.inc_by(buffers);
                 entry.bytes.inc_by(bytes);
+                if let Some(interval) = &entry.interval {
+                    interval.observe(timestamp);
+                }
             }
             PadEntry::Ignored(IgnoreReason::SeriesLimit) => {
                 untracked_series_limit.inc_by(buffers);
@@ -436,6 +526,28 @@ impl Metrics {
 
     pub(crate) fn remove_pad(&self, pad: &gst::Pad) {
         self.remove_pad_key(pad.as_ptr() as usize);
+    }
+
+    pub(crate) fn reset_pad_interval(&self, pad: &gst::Pad, timestamp: u64) {
+        if let Some(PadEntry::Tracked(entry)) = self.pads.pin().get(&(pad.as_ptr() as usize))
+            && let Some(interval) = &entry.interval
+        {
+            interval.reset(timestamp);
+        }
+    }
+
+    pub(crate) fn reset_element_intervals(&self, element: &gst::Element, timestamp: u64) {
+        if self.pad_intervals.is_none() {
+            return;
+        }
+        for (_, entry) in &self.pads.pin() {
+            if let PadEntry::Tracked(entry) = entry
+                && let Some(interval) = &entry.interval
+                && interval.owner == element.as_ptr() as usize
+            {
+                interval.reset(timestamp);
+            }
+        }
     }
 
     pub(crate) fn remove_object_key(&self, key: usize) {
@@ -452,6 +564,9 @@ impl Metrics {
             *tracked_pad_count = tracked_pad_count.saturating_sub(1);
             self.pad_buffers.remove(&entry.labels);
             self.pad_bytes.remove(&entry.labels);
+            if let Some(family) = &self.pad_intervals {
+                family.remove(&entry.labels);
+            }
         }
     }
 
@@ -727,13 +842,13 @@ mod tests {
 
     #[test]
     fn metrics_encode_exact_names_and_eof() {
-        let metrics = Metrics::new(None, None, 256);
+        let metrics = Metrics::new(None, None, 256, false);
         gst::init().expect("initializing GStreamer");
         let element = gst::ElementFactory::make("identity")
             .build()
             .expect("constructing identity");
         let pad = element.static_pad("src").expect("identity source pad");
-        metrics.update_pad(&pad, 1, 10);
+        metrics.update_pad(&pad, 1, 10, 0);
         let pipeline = gst::Pipeline::builder().name("family-pipeline").build();
         metrics.track_pipeline(&pipeline);
         let queue = gst::ElementFactory::make("queue")
@@ -782,12 +897,13 @@ mod tests {
             line == "gstsmith_gstreamer_pad_push_buffers_total{element=\"quoted\\\"slash\\\\element\",pad=\"line\\npad\"} 1"
         }), "{output}");
         assert!(output.ends_with("# EOF\n"));
+        assert!(!output.contains("pad_push_interval"));
     }
 
     #[test]
     fn concurrent_counter_increments_are_exact() {
         gst::init().expect("initializing GStreamer");
-        let metrics = Metrics::new(None, None, 1);
+        let metrics = Metrics::new(None, None, 1, false);
         let element = gst::ElementFactory::make("identity")
             .build()
             .expect("constructing identity");
@@ -798,7 +914,7 @@ mod tests {
                 let pad = pad.clone();
                 std::thread::spawn(move || {
                     for _ in 0..1_000 {
-                        metrics.update_pad(&pad, 1, 10);
+                        metrics.update_pad(&pad, 1, 10, 0);
                     }
                 })
             })
@@ -823,7 +939,7 @@ mod tests {
     #[test]
     fn concurrent_pad_registration_preserves_the_series_limit() {
         gst::init().expect("initializing GStreamer");
-        let metrics = Metrics::new(None, None, 3);
+        let metrics = Metrics::new(None, None, 3, false);
         let elements = (0..8)
             .map(|index| {
                 gst::ElementFactory::make("identity")
@@ -841,7 +957,7 @@ mod tests {
                 let pad = element.static_pad("src").expect("identity source pad");
                 std::thread::spawn(move || {
                     barrier.wait();
-                    metrics.update_pad(&pad, 1, 10);
+                    metrics.update_pad(&pad, 1, 10, 0);
                 })
             })
             .collect::<Vec<_>>();
@@ -863,7 +979,7 @@ mod tests {
     #[test]
     fn pad_series_limit_filtering_and_removal_are_stable() {
         gst::init().expect("initializing GStreamer");
-        let metrics = Metrics::new(None, None, 1);
+        let metrics = Metrics::new(None, None, 1, false);
         let first = gst::ElementFactory::make("identity")
             .name("first")
             .build()
@@ -880,11 +996,11 @@ mod tests {
         let second_pad = second.static_pad("src").expect("second source pad");
         let third_pad = third.static_pad("src").expect("third source pad");
 
-        metrics.update_pad(&first_pad, 1, 10);
-        metrics.update_pad(&second_pad, 2, 20);
+        metrics.update_pad(&first_pad, 1, 10, 0);
+        metrics.update_pad(&second_pad, 2, 20, 0);
         metrics.remove_pad(&first_pad);
-        metrics.update_pad(&second_pad, 3, 30);
-        metrics.update_pad(&third_pad, 1, 10);
+        metrics.update_pad(&second_pad, 3, 30, 0);
+        metrics.update_pad(&third_pad, 1, 10, 0);
 
         let output = metrics.encode().expect("encoding capped metrics");
         assert!(!output.contains("first"));
@@ -892,8 +1008,13 @@ mod tests {
         assert!(output.contains("third"));
         assert!(output.contains("reason=\"series_limit\"} 5"));
 
-        let filtered = Metrics::new(Some(Regex::new("allowed").expect("valid regex")), None, 1);
-        filtered.update_pad(&second_pad, 7, 70);
+        let filtered = Metrics::new(
+            Some(Regex::new("allowed").expect("valid regex")),
+            None,
+            1,
+            false,
+        );
+        filtered.update_pad(&second_pad, 7, 70, 0);
         let output = filtered.encode().expect("encoding filtered metrics");
         assert!(!output.contains("second"));
         assert!(output.contains("reason=\"series_limit\"} 0"));
@@ -902,7 +1023,7 @@ mod tests {
     #[test]
     fn pipeline_states_start_zero_then_become_one_hot_and_are_removed() {
         gst::init().expect("initializing GStreamer");
-        let metrics = Metrics::new(None, None, 1);
+        let metrics = Metrics::new(None, None, 1, false);
         let pipeline = gst::Pipeline::builder().name("state-pipeline").build();
         metrics.track_pipeline(&pipeline);
         let initial = metrics.encode().expect("encoding initial pipeline state");
@@ -938,7 +1059,7 @@ mod tests {
     #[test]
     fn queue_capacity_uses_base_units_and_escaped_labels() {
         gst::init().expect("initializing GStreamer");
-        let metrics = Metrics::new(None, None, 1);
+        let metrics = Metrics::new(None, None, 1, false);
         let queue = gst::ElementFactory::make("queue")
             .name("quoted\"queue")
             .property("max-size-buffers", 23_u32)
@@ -967,6 +1088,7 @@ mod tests {
                     filtered.then(|| include.clone()),
                     filtered.then(|| exclude.clone()),
                     1,
+                    false,
                 );
                 let sample = |queue: &gst::Element, capacity: u32| {
                     format!(
@@ -1034,7 +1156,7 @@ mod tests {
     #[test]
     fn queue_cache_handles_notifications_verification_and_cleanup() {
         gst::init().expect("initializing GStreamer");
-        let metrics = Metrics::new(None, None, 1);
+        let metrics = Metrics::new(None, None, 1, false);
         let root = gst::Pipeline::builder().name("root").build();
         let outer = gst::Bin::builder().name("outer").build();
         let queue = gst::ElementFactory::make("queue")
@@ -1125,7 +1247,7 @@ mod tests {
     fn queue_limits_cache_handles_updates_and_tracking_lifecycle() {
         gst::init().expect("initializing GStreamer");
         for factory in ["queue", "queue2"] {
-            let metrics = Metrics::new(None, None, 1);
+            let metrics = Metrics::new(None, None, 1, false);
             let queue = gst::ElementFactory::make(factory)
                 .build()
                 .expect("constructing queue");
@@ -1201,7 +1323,7 @@ mod tests {
     fn queue_sampling_refreshes_sibling_paths_and_values() {
         gst::init().expect("initializing GStreamer");
         for factory in ["queue", "queue2"] {
-            let metrics = Metrics::new(None, None, 1);
+            let metrics = Metrics::new(None, None, 1, false);
             let pipeline = gst::Pipeline::new();
             let bin = gst::Bin::builder().name("nested:bin/branch").build();
             pipeline.add(&bin).expect("parenting bin");
@@ -1247,7 +1369,7 @@ mod tests {
     #[test]
     fn queue_tracker_drops_stale_weak_entries() {
         gst::init().expect("initializing GStreamer");
-        let metrics = Metrics::new(None, None, 1);
+        let metrics = Metrics::new(None, None, 1, false);
         let queue = gst::ElementFactory::make("queue")
             .name("temporary-queue")
             .build()

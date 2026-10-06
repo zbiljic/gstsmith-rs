@@ -48,7 +48,7 @@ fn property_gst_tracers_environment_accepts_creation_parameters() {
         .env("GST_PLUGIN_PATH", plugin_path)
         .env(
             "GST_TRACERS",
-            r#"statsd(destination="127.0.0.1:9",prefix="test",global-tags="env:test",flush-interval-ms=(uint)100,exclude-filter=".*",max-pad-series=(uint)7)"#,
+            r#"statsd(destination="127.0.0.1:9",prefix="test",global-tags="env:test",flush-interval-ms=(uint)100,exclude-filter=".*",max-pad-series=(uint)7,track-intervals=(boolean)true)"#,
         )
         .args([
             "-q",

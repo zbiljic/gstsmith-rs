@@ -12,6 +12,65 @@ use regex::Regex;
 
 pub(crate) const MAX_TAG_VALUE_BYTES: usize = 192;
 
+// Match the Prometheus interval histogram; the final bucket includes every interval.
+pub(crate) const INTERVAL_BUCKETS: [(u64, &str); 9] = [
+    (1_000_000, "1"),
+    (5_000_000, "5"),
+    (10_000_000, "10"),
+    (20_000_000, "20"),
+    (40_000_000, "40"),
+    (100_000_000, "100"),
+    (250_000_000, "250"),
+    (1_000_000_000, "1000"),
+    (u64::MAX, "+Inf"),
+];
+
+#[derive(Debug)]
+pub(crate) struct PadInterval {
+    owner: usize,
+    pub(crate) data: Mutex<IntervalSnapshot>,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct IntervalSnapshot {
+    last: Option<u64>,
+    reset_at: u64,
+    pub(crate) buckets: [u64; INTERVAL_BUCKETS.len()],
+    pub(crate) count: u64,
+    pub(crate) sum_ns: u64,
+}
+
+impl PadInterval {
+    fn reset(&self, timestamp: u64) {
+        let mut data = self.data.lock();
+        data.reset_at = data.reset_at.max(timestamp);
+        if data.last.is_some_and(|last| last <= data.reset_at) {
+            data.last = None;
+        }
+    }
+
+    fn observe(&self, timestamp: u64) {
+        let mut data = self.data.lock();
+        if timestamp < data.reset_at {
+            return;
+        }
+        if let Some(previous) = data.last {
+            let Some(interval) = timestamp.checked_sub(previous) else {
+                // Concurrent hooks can reach this lock out of timestamp order.
+                return;
+            };
+            for ((bound, _), bucket) in INTERVAL_BUCKETS.iter().zip(&mut data.buckets) {
+                if interval <= *bound {
+                    *bucket = bucket.wrapping_add(1);
+                }
+            }
+            data.count = data.count.wrapping_add(1);
+            data.sum_ns = data.sum_ns.wrapping_add(interval);
+        }
+        data.last = Some(timestamp);
+    }
+}
+
 #[derive(Debug)]
 pub(crate) struct PadStats {
     pub(crate) id: u64,
@@ -19,6 +78,7 @@ pub(crate) struct PadStats {
     pub(crate) pad: String,
     pub(crate) buffers: AtomicU64,
     pub(crate) bytes: AtomicU64,
+    pub(crate) interval: Option<Box<PadInterval>>,
 }
 
 enum PadEntry {
@@ -189,6 +249,7 @@ pub(crate) struct Metrics {
     include_filter: Option<Regex>,
     exclude_filter: Option<Regex>,
     max_pad_series: usize,
+    track_intervals: bool,
     retirement: SyncSender<Arc<PadStats>>,
     pub(crate) untracked_series_limit: AtomicU64,
     pub(crate) export_emit_errors: AtomicU64,
@@ -208,9 +269,9 @@ impl MetricsSlot {
         self.0.get().map(Arc::as_ref)
     }
 
-    pub(crate) fn record_push(&self, pad: &gst::Pad, buffers: u64, bytes: u64) {
+    pub(crate) fn record_push(&self, pad: &gst::Pad, buffers: u64, bytes: u64, timestamp: u64) {
         if let Some(metrics) = self.get() {
-            metrics.update_pad(pad, buffers, bytes);
+            metrics.update_pad(pad, buffers, bytes, timestamp);
         }
     }
 }
@@ -220,6 +281,7 @@ impl Metrics {
         include_filter: Option<Regex>,
         exclude_filter: Option<Regex>,
         max_pad_series: usize,
+        track_intervals: bool,
     ) -> (Arc<Self>, Receiver<Arc<PadStats>>) {
         let (retirement, retired) = std::sync::mpsc::sync_channel(max_pad_series);
         (
@@ -236,6 +298,7 @@ impl Metrics {
                 include_filter,
                 exclude_filter,
                 max_pad_series,
+                track_intervals,
                 retirement,
                 untracked_series_limit: AtomicU64::new(0),
                 export_emit_errors: AtomicU64::new(0),
@@ -256,11 +319,17 @@ impl Metrics {
                 .is_none_or(|filter| !filter.is_match(identity))
     }
 
-    pub(crate) fn update_pad(&self, pad: &gst::Pad, buffers: u64, bytes: u64) {
+    pub(crate) fn update_pad(&self, pad: &gst::Pad, buffers: u64, bytes: u64, timestamp: u64) {
         let key = pad.as_ptr() as usize;
         let pads = self.pads.pin();
         if let Some(entry) = pads.get(&key) {
-            Self::increment_entry(entry, buffers, bytes, &self.untracked_series_limit);
+            Self::increment_entry(
+                entry,
+                buffers,
+                bytes,
+                timestamp,
+                &self.untracked_series_limit,
+            );
             return;
         }
         drop(pads);
@@ -283,7 +352,13 @@ impl Metrics {
         let mut registration = self.registration.lock();
         let pads = self.pads.pin();
         if let Some(entry) = pads.get(&key) {
-            Self::increment_entry(entry, buffers, bytes, &self.untracked_series_limit);
+            Self::increment_entry(
+                entry,
+                buffers,
+                bytes,
+                timestamp,
+                &self.untracked_series_limit,
+            );
             return;
         }
         let entry = if !included {
@@ -300,24 +375,40 @@ impl Metrics {
                 pad: labels.1,
                 buffers: AtomicU64::new(0),
                 bytes: AtomicU64::new(0),
+                interval: self.track_intervals.then(|| {
+                    Box::new(PadInterval {
+                        owner: element.as_ptr() as usize,
+                        data: Mutex::default(),
+                    })
+                }),
             }))
         } else {
             PadEntry::Ignored(IgnoreReason::SeriesIdOverflow)
         };
         let entry = pads.get_or_insert(key, entry);
-        Self::increment_entry(entry, buffers, bytes, &self.untracked_series_limit);
+        Self::increment_entry(
+            entry,
+            buffers,
+            bytes,
+            timestamp,
+            &self.untracked_series_limit,
+        );
     }
 
     fn increment_entry(
         entry: &PadEntry,
         buffers: u64,
         bytes: u64,
+        timestamp: u64,
         untracked_series_limit: &AtomicU64,
     ) {
         match entry {
             PadEntry::Tracked(stats) => {
                 stats.buffers.fetch_add(buffers, Ordering::Relaxed);
                 stats.bytes.fetch_add(bytes, Ordering::Relaxed);
+                if let Some(interval) = &stats.interval {
+                    interval.observe(timestamp);
+                }
             }
             PadEntry::Ignored(IgnoreReason::SeriesLimit | IgnoreReason::SeriesIdOverflow) => {
                 untracked_series_limit.fetch_add(buffers, Ordering::Relaxed);
@@ -339,6 +430,28 @@ impl Metrics {
 
     pub(crate) fn remove_pad(&self, pad: &gst::Pad) {
         self.remove_pad_key(pad.as_ptr() as usize);
+    }
+
+    pub(crate) fn reset_pad_interval(&self, pad: &gst::Pad, timestamp: u64) {
+        if let Some(PadEntry::Tracked(stats)) = self.pads.pin().get(&(pad.as_ptr() as usize))
+            && let Some(interval) = &stats.interval
+        {
+            interval.reset(timestamp);
+        }
+    }
+
+    pub(crate) fn reset_element_intervals(&self, element: &gst::Element, timestamp: u64) {
+        if !self.track_intervals {
+            return;
+        }
+        for (_, entry) in &self.pads.pin() {
+            if let PadEntry::Tracked(stats) = entry
+                && let Some(interval) = &stats.interval
+                && interval.owner == element.as_ptr() as usize
+            {
+                interval.reset(timestamp);
+            }
+        }
     }
 
     pub(crate) fn remove_object_key(&self, key: usize) {
@@ -575,14 +688,16 @@ mod tests {
             Some(Regex::new("included").expect("include regex")),
             Some(Regex::new("excluded").expect("exclude regex")),
             2,
+            false,
         );
         let (_included, pad) = test_pad("included:name");
-        metrics.update_pad(&pad, 2, 5);
+        metrics.update_pad(&pad, 2, 5, 0);
         let (_excluded, excluded_pad) = test_pad("included-excluded");
-        metrics.update_pad(&excluded_pad, 3, 7);
+        metrics.update_pad(&excluded_pad, 3, 7, 0);
         let snapshot = metrics.active_pads();
         assert_eq!(snapshot.len(), 1);
         assert_eq!(snapshot[0].buffers.load(Ordering::Relaxed), 2);
+        assert!(snapshot[0].interval.is_none());
         assert!(!snapshot[0].element.contains(':'));
         assert_eq!(sanitize_tag_value("a,b|c:d\n☃"), "a_b_c_d__");
         assert_eq!(sanitize_tag_value(""), "_");
@@ -591,33 +706,33 @@ mod tests {
 
     #[test]
     fn metrics_cap_slot_reuse_and_retirement() {
-        let (metrics, retired) = Metrics::new(None, None, 1);
+        let (metrics, retired) = Metrics::new(None, None, 1, false);
         let (_first, first_pad) = test_pad("first");
         let (_second, second_pad) = test_pad("second");
-        metrics.update_pad(&first_pad, 1, 10);
-        metrics.update_pad(&second_pad, 2, 20);
+        metrics.update_pad(&first_pad, 1, 10, 0);
+        metrics.update_pad(&second_pad, 2, 20, 0);
         assert_eq!(metrics.active_pads().len(), 1);
         assert_eq!(metrics.untracked_series_limit.load(Ordering::Relaxed), 2);
         metrics.remove_pad(&first_pad);
         let removed = retired.try_recv().expect("retired tracked pad");
         assert_eq!(removed.buffers.load(Ordering::Relaxed), 1);
         let (_third, third_pad) = test_pad("third");
-        metrics.update_pad(&third_pad, 3, 30);
+        metrics.update_pad(&third_pad, 3, 30, 0);
         assert_eq!(metrics.active_pads().len(), 1);
-        metrics.update_pad(&second_pad, 4, 40);
+        metrics.update_pad(&second_pad, 4, 40, 0);
         assert_eq!(metrics.untracked_series_limit.load(Ordering::Relaxed), 6);
     }
 
     #[test]
     fn concurrent_metrics_cap_is_exact() {
-        let (metrics, _retired) = Metrics::new(None, None, 2);
+        let (metrics, _retired) = Metrics::new(None, None, 2, false);
         let elements = (0..8)
             .map(|index| test_pad(&format!("pad-{index}")))
             .collect::<Vec<_>>();
         std::thread::scope(|scope| {
             for (_element, pad) in &elements {
                 let metrics = &metrics;
-                scope.spawn(move || metrics.update_pad(pad, 1, 1));
+                scope.spawn(move || metrics.update_pad(pad, 1, 1, 0));
             }
         });
         assert_eq!(metrics.active_pads().len(), 2);
@@ -635,6 +750,7 @@ mod tests {
                     filtered.then(|| include.clone()),
                     filtered.then(|| exclude.clone()),
                     1,
+                    false,
                 );
                 let has_queue =
                     |snapshots: &[QueueSnapshot], queue: &gst::Element, capacity: u32| {
@@ -710,7 +826,7 @@ mod tests {
     #[test]
     fn queue_cache_handles_notifications_verification_and_cleanup() {
         gst::init().expect("initializing GStreamer");
-        let (metrics, _retired) = Metrics::new(None, None, 1);
+        let (metrics, _retired) = Metrics::new(None, None, 1, false);
         let root = gst::Pipeline::builder().name("root").build();
         let outer = gst::Bin::builder().name("outer").build();
         let queue = gst::ElementFactory::make("queue")
@@ -795,7 +911,7 @@ mod tests {
     fn queue_limits_cache_handles_updates_and_tracking_lifecycle() {
         gst::init().expect("initializing GStreamer");
         for factory in ["queue", "queue2"] {
-            let (metrics, _retired) = Metrics::new(None, None, 1);
+            let (metrics, _retired) = Metrics::new(None, None, 1, false);
             let queue = gst::ElementFactory::make(factory)
                 .build()
                 .expect("constructing queue");
@@ -867,7 +983,7 @@ mod tests {
     fn queue_sampling_refreshes_sibling_paths_and_values() {
         gst::init().expect("initializing GStreamer");
         for factory in ["queue", "queue2"] {
-            let (metrics, _retired) = Metrics::new(None, None, 1);
+            let (metrics, _retired) = Metrics::new(None, None, 1, false);
             let pipeline = gst::Pipeline::new();
             let bin = gst::Bin::builder().name("nested:bin/branch").build();
             pipeline.add(&bin).expect("parenting bin");
@@ -903,7 +1019,7 @@ mod tests {
     #[test]
     fn queue_tracker_drops_stale_weak_entries() {
         gst::init().expect("initializing GStreamer");
-        let (metrics, _retired) = Metrics::new(None, None, 1);
+        let (metrics, _retired) = Metrics::new(None, None, 1, false);
         let queue = gst::ElementFactory::make("queue")
             .build()
             .expect("constructing queue");
@@ -920,12 +1036,12 @@ mod tests {
 
     #[test]
     fn retirement_queue_full_is_bounded() {
-        let (metrics, _retired) = Metrics::new(None, None, 1);
+        let (metrics, _retired) = Metrics::new(None, None, 1, false);
         let (_first, first_pad) = test_pad("one");
-        metrics.update_pad(&first_pad, 1, 1);
+        metrics.update_pad(&first_pad, 1, 1, 0);
         metrics.remove_pad(&first_pad);
         let (_second, second_pad) = test_pad("two");
-        metrics.update_pad(&second_pad, 1, 1);
+        metrics.update_pad(&second_pad, 1, 1, 0);
         metrics.remove_pad(&second_pad);
         assert_eq!(metrics.dropped_retirements.load(Ordering::Relaxed), 1);
     }

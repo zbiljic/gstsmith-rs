@@ -29,6 +29,7 @@ curl --fail http://127.0.0.1:9099/metrics
 | `include-filter` | unset | Regular expression selecting pad, queue, and pipeline identities |
 | `exclude-filter` | unset | Regular expression applied after the include filter |
 | `max-pad-series` | `256` | Maximum active pad label sets (1 through 65535) |
+| `track-intervals` | `false` | Collect a fixed-bucket histogram of time between push attempts on each tracked pad |
 | `bound-address` | - | Read-only actual listener address; empty when startup fails |
 | `server-running` | - | Read-only server startup status |
 
@@ -47,6 +48,7 @@ need to detect a startup error.
 |---|---|---|
 | `gstsmith_gstreamer_pad_push_buffers_total` | counter | `element`, `pad` |
 | `gstsmith_gstreamer_pad_push_bytes_total` | counter | `element`, `pad` |
+| `gstsmith_gstreamer_pad_push_interval_seconds` | histogram, opt-in | `element`, `pad`; buckets also have `le` |
 | `gstsmith_gstreamer_pipeline_state` | gauge | `pipeline`, `state` |
 | `gstsmith_gstreamer_queue_level_buffers` | gauge | `element` |
 | `gstsmith_gstreamer_queue_level_bytes` | gauge | `element` |
@@ -74,6 +76,37 @@ Queue identities and filters refresh after bin additions/removals and renames.
 Direct `GstObject` parenting outside bin APIs is detected by a fallback check at
 the first scrape at least 30 seconds after the previous check. Queue levels
 and configured limits remain current at each scrape.
+
+## Push arrival intervals
+
+Enable `track-intervals=(boolean)true` in the tracer parameters to measure
+delivery spacing and reveal bursts or stalls hidden by average buffer rates.
+The histogram uses GStreamer's monotonic hook timestamps, with upper bounds of
+1, 5, 10, 20, 40, 100, 250, and 1000 ms, plus infinity. OpenMetrics exports
+these bounds and the sum in **seconds**, with `_bucket`, `_count`, and `_sum`
+series. Estimate P95 spacing per pad with:
+
+```promql
+histogram_quantile(0.95, rate(gstsmith_gstreamer_pad_push_interval_seconds_bucket[1m]))
+```
+
+Each buffer-list push contributes one arrival, regardless of member count;
+ordinary buffers and lists share the same pad baseline. The first attempt
+establishes a baseline. Flush, stream-start, segment, EOS, and element state
+transitions clear it without erasing accumulated samples. The next attempt
+establishes a new baseline, so pauses and seeks do not create artificial gaps.
+Concurrent hooks observed out of timestamp order are skipped for interval
+measurement. Counters still include their attempted buffers and bytes.
+
+These are intervals between push attempts, not CPU time, end-to-end latency,
+or OS scheduler latency. Pull-mode arrivals are outside this metric's scope.
+Histograms share the pad filters, active series limit, and removal lifecycle;
+they keep fixed-size bucket counts and no per-event queue. Enabled collection
+takes a short per-pad lock. Collection and histogram allocation are disabled
+by default.
+
+See the [combined tracing example](../../examples/tracing/README.md) for
+arrival histograms alongside native latency tracing and queue history.
 
 ## Scope and security
 

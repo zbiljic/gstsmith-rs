@@ -38,7 +38,7 @@ fn gst_tracers_environment_accepts_startup_properties() {
         .env("GST_PLUGIN_PATH", plugin_path)
         .env(
             "GST_TRACERS",
-            r#"prometheus(listen="127.0.0.1:0",exclude-filter=".*",max-pad-series=(uint)7)"#,
+            r#"prometheus(listen="127.0.0.1:0",exclude-filter=".*",max-pad-series=(uint)7,track-intervals=(boolean)true)"#,
         )
         .args([
             "-q",

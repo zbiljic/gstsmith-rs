@@ -14,7 +14,7 @@ mod metrics;
 
 fn new_metrics(max_pad_series: usize) -> metrics::MetricsSlot {
     let slot = metrics::MetricsSlot::default();
-    let (collector, _retired) = metrics::Metrics::new(None, None, max_pad_series);
+    let (collector, _retired) = metrics::Metrics::new(None, None, max_pad_series, false);
     assert!(slot.install(collector));
     slot
 }
@@ -27,9 +27,9 @@ fn benchmark_hot_path(criterion: &mut Criterion) {
     let pad = element.static_pad("src").expect("benchmark source pad");
 
     let tracked = new_metrics(1);
-    tracked.record_push(&pad, 1, 1_024);
+    tracked.record_push(&pad, 1, 1_024, 0);
     criterion.bench_function("tracer slot cached tracked pad update", |bencher| {
-        bencher.iter(|| tracked.record_push(&pad, 1, 1_024));
+        bencher.iter(|| tracked.record_push(&pad, 1, 1_024, 0));
     });
 
     let ignored = new_metrics(1);
@@ -37,10 +37,10 @@ fn benchmark_hot_path(criterion: &mut Criterion) {
         .build()
         .expect("constructing capped element");
     let first_pad = first.static_pad("src").expect("first source pad");
-    ignored.record_push(&first_pad, 1, 1);
-    ignored.record_push(&pad, 1, 1_024);
+    ignored.record_push(&first_pad, 1, 1, 0);
+    ignored.record_push(&pad, 1, 1_024, 0);
     criterion.bench_function("tracer slot cached ignored pad update", |bencher| {
-        bencher.iter(|| ignored.record_push(&pad, 1, 1_024));
+        bencher.iter(|| ignored.record_push(&pad, 1, 1_024, 0));
     });
 }
 
@@ -64,7 +64,7 @@ fn benchmark_contention(criterion: &mut Criterion) {
             .map(|element| element.static_pad("src").expect("benchmark source pad"))
             .collect::<Vec<_>>();
         for pad in &pads {
-            collector.record_push(pad, 1, 1_024);
+            collector.record_push(pad, 1, 1_024, 0);
         }
         group.throughput(Throughput::Elements(
             u64::try_from(thread_count).expect("thread count fits in u64"),
@@ -80,7 +80,7 @@ fn benchmark_contention(criterion: &mut Criterion) {
                             let collector = &collector;
                             scope.spawn(move || {
                                 for _ in 0..iterations {
-                                    collector.record_push(pad, 1, 1_024);
+                                    collector.record_push(pad, 1, 1_024, 0);
                                 }
                             });
                         }
@@ -101,7 +101,7 @@ fn benchmark_contention(criterion: &mut Criterion) {
                             let collector = &collector;
                             scope.spawn(move || {
                                 for _ in 0..iterations {
-                                    collector.record_push(shared_pad, 1, 1_024);
+                                    collector.record_push(shared_pad, 1, 1_024, 0);
                                 }
                             });
                         }

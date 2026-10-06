@@ -395,7 +395,7 @@ mod tests {
     #[test]
     fn server_routes_get_head_not_found_and_method_not_allowed() {
         let listener = TcpListener::bind("127.0.0.1:0").expect("binding test listener");
-        let metrics = Metrics::new(None, None, 1);
+        let metrics = Metrics::new(None, None, 1, false);
         let mut server = start(listener, metrics).expect("starting test server");
 
         let get = request(
@@ -449,7 +449,7 @@ mod tests {
     #[test]
     fn shutdown_interrupts_partial_client() {
         let listener = TcpListener::bind("127.0.0.1:0").expect("binding test listener");
-        let metrics = Metrics::new(None, None, 1);
+        let metrics = Metrics::new(None, None, 1, false);
         let mut server = start(listener, metrics).expect("starting test server");
         let mut stream = std::net::TcpStream::connect(server.address).expect("connecting");
         stream
@@ -469,7 +469,7 @@ mod tests {
     #[test]
     fn encoding_failure_returns_500_and_is_counted_on_next_scrape() {
         let listener = TcpListener::bind("127.0.0.1:0").expect("binding test listener");
-        let metrics = Metrics::new(None, None, 1);
+        let metrics = Metrics::new(None, None, 1, false);
         metrics.fail_next_encoding_for_test();
         let mut server = start(listener, Arc::clone(&metrics)).expect("starting test server");
 
@@ -501,13 +501,13 @@ mod tests {
     fn simultaneous_updates_and_http_scrapes_preserve_exact_totals() {
         gst::init().expect("initializing GStreamer");
         let listener = TcpListener::bind("127.0.0.1:0").expect("binding test listener");
-        let metrics = Metrics::new(None, None, 1);
+        let metrics = Metrics::new(None, None, 1, false);
         let element = gst::ElementFactory::make("identity")
             .name("concurrent-source")
             .build()
             .expect("constructing concurrent element");
         let pad = element.static_pad("src").expect("concurrent source pad");
-        metrics.update_pad(&pad, 0, 0);
+        metrics.update_pad(&pad, 0, 0, 0);
         let mut server = start(listener, Arc::clone(&metrics)).expect("starting test server");
         let barrier = Arc::new(Barrier::new(6));
         let workers = (0..4)
@@ -518,7 +518,7 @@ mod tests {
                 std::thread::spawn(move || {
                     barrier.wait();
                     for _ in 0..1_000 {
-                        metrics.update_pad(&pad, 1, 10);
+                        metrics.update_pad(&pad, 1, 10, 0);
                     }
                 })
             })
@@ -561,7 +561,7 @@ mod tests {
     #[test]
     fn client_disconnect_does_not_break_subsequent_scrapes() {
         let listener = TcpListener::bind("127.0.0.1:0").expect("binding test listener");
-        let metrics = Metrics::new(None, None, 1);
+        let metrics = Metrics::new(None, None, 1, false);
         let mut server = start(listener, metrics).expect("starting test server");
         let mut disconnected =
             std::net::TcpStream::connect(server.address).expect("connecting disconnecting client");

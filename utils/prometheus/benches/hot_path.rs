@@ -23,22 +23,22 @@ fn benchmark_hot_path(criterion: &mut Criterion) {
         .expect("finding benchmark source pad");
 
     let tracked = metrics::MetricsSlot::default();
-    assert!(tracked.install(metrics::Metrics::new(None, None, 1)));
-    tracked.record_push(&pad, 1, 1_024);
+    assert!(tracked.install(metrics::Metrics::new(None, None, 1, false)));
+    tracked.record_push(&pad, 1, 1_024, 0);
     criterion.bench_function("tracer slot cached tracked pad update", |bencher| {
-        bencher.iter(|| tracked.record_push(&pad, 1, 1_024));
+        bencher.iter(|| tracked.record_push(&pad, 1, 1_024, 0));
     });
 
     let ignored = metrics::MetricsSlot::default();
-    assert!(ignored.install(metrics::Metrics::new(None, None, 1)));
+    assert!(ignored.install(metrics::Metrics::new(None, None, 1, false)));
     let first = gst::ElementFactory::make("identity")
         .build()
         .expect("constructing first capped element");
     let first_pad = first.static_pad("src").expect("finding first source pad");
-    ignored.record_push(&first_pad, 1, 1);
-    ignored.record_push(&pad, 1, 1_024);
+    ignored.record_push(&first_pad, 1, 1, 0);
+    ignored.record_push(&pad, 1, 1_024, 0);
     criterion.bench_function("tracer slot cached ignored pad update", |bencher| {
-        bencher.iter(|| ignored.record_push(&pad, 1, 1_024));
+        bencher.iter(|| ignored.record_push(&pad, 1, 1_024, 0));
     });
 
     let scrape = tracked.get().expect("installed benchmark metrics");
@@ -56,7 +56,7 @@ fn benchmark_contention(criterion: &mut Criterion) {
 
     for thread_count in [1_usize, 2, 4, 8] {
         let metrics = metrics::MetricsSlot::default();
-        assert!(metrics.install(metrics::Metrics::new(None, None, thread_count)));
+        assert!(metrics.install(metrics::Metrics::new(None, None, thread_count, false)));
         let elements = (0..thread_count)
             .map(|_| {
                 gst::ElementFactory::make("identity")
@@ -73,7 +73,7 @@ fn benchmark_contention(criterion: &mut Criterion) {
             })
             .collect::<Vec<_>>();
         for pad in &pads {
-            metrics.record_push(pad, 1, 1_024);
+            metrics.record_push(pad, 1, 1_024, 0);
         }
 
         group.throughput(Throughput::Elements(
@@ -90,7 +90,7 @@ fn benchmark_contention(criterion: &mut Criterion) {
                             let metrics = &metrics;
                             scope.spawn(move || {
                                 for _ in 0..iterations {
-                                    metrics.record_push(pad, 1, 1_024);
+                                    metrics.record_push(pad, 1, 1_024, 0);
                                 }
                             });
                         }
@@ -112,7 +112,7 @@ fn benchmark_contention(criterion: &mut Criterion) {
                             let metrics = &metrics;
                             scope.spawn(move || {
                                 for _ in 0..iterations {
-                                    metrics.record_push(shared_pad, 1, 1_024);
+                                    metrics.record_push(shared_pad, 1, 1_024, 0);
                                 }
                             });
                         }

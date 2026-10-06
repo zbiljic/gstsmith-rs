@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 use cadence::prelude::{Counted, Gauged};
 use cadence::{BufferedUdpMetricSink, StatsdClient};
 
-use crate::metrics::{Metrics, PadStats};
+use crate::metrics::{INTERVAL_BUCKETS, Metrics, PadStats};
 
 const BUFFER_CAPACITY: usize = 1_432;
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(2);
@@ -201,6 +201,14 @@ struct ExportState {
 struct PadCursor {
     buffers: CounterCursor,
     bytes: CounterCursor,
+    interval: Option<Box<IntervalCursor>>,
+}
+
+#[derive(Default)]
+struct IntervalCursor {
+    buckets: [CounterCursor; INTERVAL_BUCKETS.len()],
+    count: CounterCursor,
+    sum_ns: CounterCursor,
 }
 
 #[derive(Default)]
@@ -420,8 +428,8 @@ fn export_pad(
         error_log,
         "gstreamer.pad.push_buffers",
         pad.buffers.load(Ordering::Relaxed),
-        &pad.element,
-        &pad.pad,
+        (&pad.element, &pad.pad),
+        None,
         &mut cursor.buffers,
     );
     export_pad_counter(
@@ -430,15 +438,59 @@ fn export_pad(
         error_log,
         "gstreamer.pad.push_bytes",
         pad.bytes.load(Ordering::Relaxed),
-        &pad.element,
-        &pad.pad,
+        (&pad.element, &pad.pad),
+        None,
         &mut cursor.bytes,
     );
+    if let Some(interval) = &pad.interval {
+        // Copy the bounded counters before doing any formatting or network I/O.
+        let snapshot = *interval.data.lock();
+        let cursor = cursor.interval.get_or_insert_with(Default::default);
+        for (((_, bound), current), bucket_cursor) in INTERVAL_BUCKETS
+            .iter()
+            .zip(snapshot.buckets)
+            .zip(&mut cursor.buckets)
+        {
+            export_pad_counter(
+                client,
+                metrics,
+                error_log,
+                "gstreamer.pad.push_interval.bucket",
+                current,
+                (&pad.element, &pad.pad),
+                Some(bound),
+                bucket_cursor,
+            );
+        }
+        for (key, current, counter) in [
+            (
+                "gstreamer.pad.push_interval.count",
+                snapshot.count,
+                &mut cursor.count,
+            ),
+            (
+                "gstreamer.pad.push_interval.sum_ns",
+                snapshot.sum_ns,
+                &mut cursor.sum_ns,
+            ),
+        ] {
+            export_pad_counter(
+                client,
+                metrics,
+                error_log,
+                key,
+                current,
+                (&pad.element, &pad.pad),
+                None,
+                counter,
+            );
+        }
+    }
 }
 
 #[expect(
     clippy::too_many_arguments,
-    reason = "the arguments make cursor advancement and the two bounded tags explicit"
+    reason = "the arguments make cursor advancement and the bounded pad/bucket tags explicit"
 )]
 fn export_pad_counter(
     client: &StatsdClient,
@@ -446,8 +498,8 @@ fn export_pad_counter(
     error_log: &mut ErrorLog,
     key: &str,
     current: u64,
-    element: &str,
-    pad: &str,
+    labels: (&str, &str),
+    upper_bound_ms: Option<&str>,
     cursor: &mut CounterCursor,
 ) {
     let delta = current.wrapping_sub(cursor.value);
@@ -455,11 +507,14 @@ fn export_pad_counter(
         return;
     }
     let amount = delta.min(i64::MAX as u64);
-    let result = client
+    let mut builder = client
         .count_with_tags(key, i64::try_from(amount).unwrap_or(i64::MAX))
-        .with_tag("element", element)
-        .with_tag("pad", pad)
-        .try_send();
+        .with_tag("element", labels.0)
+        .with_tag("pad", labels.1);
+    if let Some(bound) = upper_bound_ms {
+        builder = builder.with_tag("le_ms", bound);
+    }
+    let result = builder.try_send();
     if result.is_ok() {
         cursor.value = cursor.value.wrapping_add(amount);
         cursor.was_active = delta != 0;
@@ -566,16 +621,95 @@ mod tests {
     }
 
     #[test]
+    fn interval_export_uses_bucket_deltas_and_flushes_retired_pads() {
+        gst::init().expect("initializing GStreamer");
+        let recorded = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let client = StatsdClient::from_sink("gstsmith", RecordingSink(Arc::clone(&recorded)));
+        let (metrics, retired) = Metrics::new(None, None, 1, true);
+        let element = gst::ElementFactory::make("identity")
+            .build()
+            .expect("identity");
+        let pad = element.static_pad("src").expect("source pad");
+        let mut state = ExportState::default();
+        let mut error_log = ErrorLog::default();
+        for timestamp in [0, 1_000_000, 6_000_000] {
+            metrics.update_pad(&pad, 1, 1, timestamp);
+        }
+        export_snapshot(&client, &metrics, &retired, &mut state, &mut error_log);
+        let lines = std::mem::take(&mut *recorded.lock().expect("recording sink"));
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.contains("push_interval.bucket:1|c") && line.ends_with("le_ms:1"))
+        );
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.contains("push_interval.bucket:2|c") && line.ends_with("le_ms:5"))
+        );
+        assert!(
+            lines.iter().any(
+                |line| line.contains("push_interval.bucket:2|c") && line.contains("le_ms:+Inf")
+            )
+        );
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.contains("push_interval.count:2|c"))
+        );
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.contains("push_interval.sum_ns:6000000|c"))
+        );
+
+        metrics.update_pad(&pad, 1, 1, 16_000_000);
+        export_snapshot(&client, &metrics, &retired, &mut state, &mut error_log);
+        let lines = std::mem::take(&mut *recorded.lock().expect("recording sink"));
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.contains("push_interval.count:1|c"))
+        );
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.contains("push_interval.sum_ns:10000000|c"))
+        );
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.contains("push_interval.bucket:0|c") && line.ends_with("le_ms:5"))
+        );
+
+        metrics.update_pad(&pad, 1, 1, 56_000_000);
+        metrics.remove_pad(&pad);
+        export_snapshot(&client, &metrics, &retired, &mut state, &mut error_log);
+        let lines = recorded.lock().expect("recording sink");
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.contains("push_interval.count:1|c"))
+        );
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.contains("push_interval.sum_ns:40000000|c"))
+        );
+        assert!(state.pads.is_empty());
+    }
+
+    #[test]
     fn worker_shutdown_flush_delivers_pending_counter_and_stops_within_budget() {
         gst::init().expect("initializing GStreamer");
         let (socket, destination) = receiver();
-        let (metrics, retired) = Metrics::new(None, None, 1);
+        let (metrics, retired) = Metrics::new(None, None, 1, false);
         let element = gst::ElementFactory::make("identity")
             .name("shutdown-observed")
             .build()
             .expect("identity");
         let pad = element.static_pad("src").expect("source pad");
-        metrics.update_pad(&pad, 5, 50);
+        metrics.update_pad(&pad, 5, 50, 0);
         let mut worker = start(
             WorkerConfig {
                 destination,
@@ -607,13 +741,13 @@ mod tests {
     fn export_counter_delta_and_idle_zero() {
         gst::init().expect("initializing GStreamer");
         let (socket, destination) = receiver();
-        let (metrics, retired) = Metrics::new(None, None, 1);
+        let (metrics, retired) = Metrics::new(None, None, 1, false);
         let element = gst::ElementFactory::make("identity")
             .name("observed")
             .build()
             .expect("identity");
         let pad = element.static_pad("src").expect("source pad");
-        metrics.update_pad(&pad, 3, 9);
+        metrics.update_pad(&pad, 3, 9, 0);
         let mut worker = start(
             WorkerConfig {
                 destination,
@@ -650,7 +784,7 @@ mod tests {
             .collect::<Vec<_>>()
             .join(",");
         let line = format!(
-            "{prefix}.gstreamer.pad.push_bytes:{}|c|#element:{tag},pad:{tag},{global_tags}\n",
+            "{prefix}.gstreamer.pad.push_interval.bucket:{}|c|#element:{tag},pad:{tag},le_ms:+Inf,{global_tags}\n",
             i64::MAX,
         );
         assert!(
@@ -690,13 +824,14 @@ mod tests {
     fn retirement_combines_post_snapshot_increment_into_one_final_delta() {
         let recorded = Arc::new(std::sync::Mutex::new(Vec::new()));
         let client = StatsdClient::from_sink("gstsmith", RecordingSink(Arc::clone(&recorded)));
-        let (metrics, _unused_retired) = Metrics::new(None, None, 2);
+        let (metrics, _unused_retired) = Metrics::new(None, None, 2, false);
         let active_pad = Arc::new(PadStats {
             id: 41,
             element: "element".to_owned(),
             pad: "src".to_owned(),
             buffers: AtomicU64::new(2),
             bytes: AtomicU64::new(0),
+            interval: None,
         });
         let active = vec![active_pad];
         let mut state = ExportState {
@@ -708,6 +843,7 @@ mod tests {
                         was_active: true,
                     },
                     bytes: CounterCursor::default(),
+                    interval: None,
                 },
             )]),
             ..ExportState::default()
@@ -722,6 +858,7 @@ mod tests {
             pad: "src".to_owned(),
             buffers: AtomicU64::new(3),
             bytes: AtomicU64::new(0),
+            interval: None,
         });
         let (sender, retired) = std::sync::mpsc::sync_channel(2);
         sender
@@ -757,13 +894,14 @@ mod tests {
     fn retirement_without_post_snapshot_increment_does_not_emit_idle_zero() {
         let recorded = Arc::new(std::sync::Mutex::new(Vec::new()));
         let client = StatsdClient::from_sink("gstsmith", RecordingSink(Arc::clone(&recorded)));
-        let (metrics, _unused_retired) = Metrics::new(None, None, 1);
+        let (metrics, _unused_retired) = Metrics::new(None, None, 1, false);
         let pad = Arc::new(PadStats {
             id: 42,
             element: "element".to_owned(),
             pad: "src".to_owned(),
             buffers: AtomicU64::new(2),
             bytes: AtomicU64::new(0),
+            interval: None,
         });
         let active = vec![Arc::clone(&pad)];
         let mut state = ExportState {
@@ -775,6 +913,7 @@ mod tests {
                         was_active: true,
                     },
                     bytes: CounterCursor::default(),
+                    interval: None,
                 },
             )]),
             ..ExportState::default()
@@ -811,13 +950,14 @@ mod tests {
     #[test]
     fn retirement_failed_final_emit_does_not_leak_cursor() {
         let client = StatsdClient::from_sink("gstsmith", FailOnceSink(AtomicBool::new(true)));
-        let (metrics, _unused_retired) = Metrics::new(None, None, 1);
+        let (metrics, _unused_retired) = Metrics::new(None, None, 1, false);
         let pad = Arc::new(PadStats {
             id: 43,
             element: "element".to_owned(),
             pad: "src".to_owned(),
             buffers: AtomicU64::new(1),
             bytes: AtomicU64::new(0),
+            interval: None,
         });
         let mut state = ExportState::default();
         let mut error_log = ErrorLog::default();
@@ -833,7 +973,7 @@ mod tests {
 
     #[test]
     fn export_internal_failure_policy_counts_without_recursive_amplification() {
-        let (metrics, _retired) = Metrics::new(None, None, 1);
+        let (metrics, _retired) = Metrics::new(None, None, 1, false);
         metrics.untracked_series_limit.store(1, Ordering::Relaxed);
         let ordinary_client =
             StatsdClient::from_sink("gstsmith", FailOnceSink(AtomicBool::new(true)));
@@ -875,7 +1015,7 @@ mod tests {
     #[test]
     fn export_cursor_retries_after_immediate_rejection() {
         let client = StatsdClient::from_sink("gstsmith", FailOnceSink(AtomicBool::new(true)));
-        let (metrics, _retired) = Metrics::new(None, None, 1);
+        let (metrics, _retired) = Metrics::new(None, None, 1, false);
         let mut cursor = CounterCursor::default();
         let mut error_log = ErrorLog::default();
         export_pad_counter(
@@ -884,8 +1024,8 @@ mod tests {
             &mut error_log,
             "gstreamer.pad.push_buffers",
             7,
-            "element",
-            "src",
+            ("element", "src"),
+            None,
             &mut cursor,
         );
         assert_eq!(cursor.value, 0);
@@ -895,8 +1035,8 @@ mod tests {
             &mut error_log,
             "gstreamer.pad.push_buffers",
             7,
-            "element",
-            "src",
+            ("element", "src"),
+            None,
             &mut cursor,
         );
         assert_eq!(cursor.value, 7);

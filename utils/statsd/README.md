@@ -36,6 +36,7 @@ ignored with a warning.
 | `include-filter` | nullable string | unset | Regex selecting unsanitized metric scope identities. |
 | `exclude-filter` | nullable string | unset | Regex applied after include; matching scopes are excluded. |
 | `max-pad-series` | unsigned integer | `256` | Exact active pad-labelset cap from 1 through 65535. |
+| `track-intervals` | boolean | `false` | Collect fixed-bucket histograms of spacing between pad push attempts. |
 | `worker-running` | read-only boolean | `false` | True only after worker startup succeeds. |
 
 Invalid destinations, prefixes, tags, or regular expressions leave the tracer
@@ -51,6 +52,9 @@ deltas rather than cumulative process totals.
 |---|---|---|---|
 | `gstreamer.pad.push_buffers` | counter | `element`, `pad` | Buffer attempts since the last accepted emission. |
 | `gstreamer.pad.push_bytes` | counter | `element`, `pad` | Byte attempts since the last accepted emission. |
+| `gstreamer.pad.push_interval.bucket` | counter, opt-in | `element`, `pad`, `le_ms` | New intervals at or below the given upper bound in milliseconds. |
+| `gstreamer.pad.push_interval.count` | counter, opt-in | `element`, `pad` | Number of new interval samples. |
+| `gstreamer.pad.push_interval.sum_ns` | counter, opt-in | `element`, `pad` | Sum of new intervals in nanoseconds. |
 | `gstreamer.pipeline.state` | gauge | `pipeline`, `state` | One-hot `null`, `ready`, `paused`, and `playing` values. |
 | `gstreamer.queue.level_buffers` | gauge | `element` | Current queued buffers. |
 | `gstreamer.queue.level_bytes` | gauge | `element` | Current queued bytes. |
@@ -79,9 +83,34 @@ Direct `GstObject` parenting outside bin APIs is detected by a fallback check at
 the first export at least 30 seconds after the previous check. Queue levels
 and configured limits remain current at each export.
 
+## Push arrival intervals
+
+Set `track-intervals=(boolean)true` in the tracer parameters. Intervals use
+GStreamer's monotonic hook timestamps. Each buffer or buffer-list push is one
+arrival; list members do not create extra samples. The first arrival establishes
+a baseline. Flush, stream-start, segment, EOS, and element state transitions
+clear that baseline while preserving accumulated counts. Concurrent hooks
+observed out of timestamp order are skipped for interval measurement.
+
+The fixed upper bounds are 1, 5, 10, 20, 40, 100, 250, and 1000 ms, plus `+Inf`.
+Buckets are cumulative across bounds: a 4 ms interval increments every bucket
+from `le_ms:5` through `le_ms:+Inf`. The worker exports temporal deltas of these
+counts, using ordinary DogStatsD **counters**. They are pre-aggregated buckets,
+not DogStatsD `h`/`d` samples; receiver-generated histogram percentiles are not
+automatically available. The mean in milliseconds is `sum_ns / count / 1e6`
+using totals over the same time window. Unobserved buckets emit nothing;
+interpret their missing counters as zero.
+
+Histograms share existing pad filters, series limits, and retirement handling.
+Their state is bounded per tracked pad and stores no individual samples.
+They measure push-attempt spacing, not processing time or transit latency.
+See the [combined tracing example](../../examples/tracing/README.md) for
+complementary latency and queue diagnostics.
+
 ## Runtime and scope
 
-Streaming callbacks only use a cached Papaya lookup and relaxed atomics. The
+Recurring counter updates use a cached Papaya lookup and relaxed atomics.
+Opt-in interval collection also takes a short per-pad lock. The
 owned `gst-statsd-export` thread performs formatting, queue inspection,
 buffering, and all network work. It uses Cadence's buffered UDP sink, not
 Tokio, a global metrics recorder, DNS, or an additional queue. Disposal wakes
