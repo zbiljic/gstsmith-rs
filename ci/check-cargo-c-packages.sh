@@ -85,12 +85,12 @@ shopt -s nullglob
 dynamic_files=("$plugin_dir"/lib*."$dynamic_suffix")
 static_files=("$plugin_dir"/lib*.a)
 pc_files=("$pc_dir"/*.pc)
-test "${#dynamic_files[@]}" -eq 11 ||
-  fail "expected exactly 11 dynamic plugin libraries, found ${#dynamic_files[@]}"
-test "${#static_files[@]}" -eq 11 ||
-  fail "expected exactly 11 static plugin archives, found ${#static_files[@]}"
-test "${#pc_files[@]}" -eq 11 ||
-  fail "expected exactly 11 pkg-config modules, found ${#pc_files[@]}"
+test "${#dynamic_files[@]}" -eq "${#packages[@]}" ||
+  fail "expected ${#packages[@]} dynamic plugin libraries, found ${#dynamic_files[@]}"
+test "${#static_files[@]}" -eq "${#packages[@]}" ||
+  fail "expected ${#packages[@]} static plugin archives, found ${#static_files[@]}"
+test "${#pc_files[@]}" -eq "${#packages[@]}" ||
+  fail "expected ${#packages[@]} pkg-config modules, found ${#pc_files[@]}"
 
 unset PKG_CONFIG_LIBDIR
 export PKG_CONFIG_PATH="$pc_dir"
@@ -225,4 +225,4 @@ done
 
 printf 'Validated dynamic plugins: %s\n' "${plugin_names[*]}"
 printf 'Validated pkg-config modules: %s\n' "${modules[*]}"
-printf 'Validated 11 static archives with one static consumer per plugin\n'
+printf 'Validated %s static archives with one static consumer per plugin\n' "${#packages[@]}"
