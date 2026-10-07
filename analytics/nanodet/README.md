@@ -58,6 +58,10 @@ Every retained result produces one object-detection entry and one related
 classification entry. Without a label file, classes use stable names such as
 `class-7`. Coordinates are clamped to the negotiated 320x320 or 416x416 frame.
 
+For COCO models, use the bundled [label file](assets/coco-80.txt).
+It follows [NanoDet's class order](https://github.com/RangiLyu/nanodet/blob/be9b4a9001d7f9b6fc89c2df31ae8d428e35b4f0/config/nanodet-plus-m_320.yml)
+(Apache-2.0), with underscores replaced by spaces.
+
 When `videoscale add-borders=true` letterboxes the input, detections remain in
 the model's coordinate space. The decoder does not remove the letterbox offset
 when mapping detections back to the original frame.
@@ -77,7 +81,9 @@ gst-launch-1.0 \
       model-file=/path/to/nanodet-plus-m-1.5x-416.onnx \
       model-channel-order=bgr \
       model-info-file=analytics/nanodet/tests/fixtures/nanodet-plus-m-416.onnx.modelinfo \
-  ! nanodettensordec tensor-id=nanodet-output \
+  ! nanodettensordec \
+      tensor-id=nanodet-output \
+      label-file=analytics/nanodet/assets/coco-80.txt \
   ! objectdetectionoverlay \
   ! fakesink
 ```

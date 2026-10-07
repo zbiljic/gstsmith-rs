@@ -296,16 +296,11 @@ fn raw_int8_tensor_fails_streaming() {
 }
 
 #[test]
-fn accepts_an_eighty_label_file_and_rejects_bad_files() {
+fn accepts_coco_labels_and_rejects_bad_files() {
     init();
     let contract = CONTRACTS[1];
     let directory = tempfile::tempdir().expect("temporary directory");
-    let valid = directory.path().join("labels.txt");
-    let labels = (0..CLASSES)
-        .map(|index| format!("label-{index}"))
-        .collect::<Vec<_>>()
-        .join("\n");
-    fs::write(&valid, labels).expect("write valid labels");
+    let valid = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/coco-80.txt");
     let element = gst::ElementFactory::make("nanodettensordec")
         .property("label-file", valid.to_string_lossy().as_ref())
         .build()
@@ -334,7 +329,7 @@ fn accepts_an_eighty_label_file_and_rejects_bad_files() {
             .obj_type()
             .expect("label")
             .as_str(),
-        "label-7"
+        "truck"
     );
 
     let missing = directory.path().join("missing.txt");
