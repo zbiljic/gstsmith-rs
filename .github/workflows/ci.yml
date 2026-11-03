@@ -23,6 +23,10 @@ permissions:
   contents: read
   pull-requests: read
 
+env:
+  # Keep tasks from installing tools omitted by each job's setup.
+  MISE_TASK_RUN_AUTO_INSTALL: "false"
+
 concurrency:
   group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.head_ref || github.ref_name }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
@@ -74,6 +78,8 @@ jobs:
 
       - name: Setup mise
         uses: jdx/mise-action@v5
+        with:
+          install_args: rust
 
       - name: Cache Rust dependencies
         uses: Swatinem/rust-cache@v2
@@ -125,6 +131,8 @@ jobs:
 
       - name: Setup mise
         uses: jdx/mise-action@v5
+        with:
+          install_args: rust
 
       - name: Cache Rust dependencies
         uses: Swatinem/rust-cache@v2
@@ -194,6 +202,8 @@ jobs:
 
       - name: Setup mise
         uses: jdx/mise-action@v5
+        with:
+          install_args: rust
 
       - name: Cache Rust dependencies
         uses: Swatinem/rust-cache@v2
@@ -311,6 +321,10 @@ jobs:
 
       - name: Setup mise
         uses: jdx/mise-action@v5
+        with:
+          install_args: >-
+            rust ruff cargo:cargo-deny cargo:cargo-sort
+            ${{ inputs.extended && 'cargo:cargo-c' || '' }}
 
       - name: Cache Rust dependencies
         uses: Swatinem/rust-cache@v2
