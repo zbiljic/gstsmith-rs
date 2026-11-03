@@ -111,7 +111,7 @@ impl SessionPlan {
         options: EngineOptions,
     ) -> Result<Self, String> {
         let options = options.validate()?;
-        let mut builder = Session::builder()
+        let mut builder = Session::builder(crate::environment()?)
             .map_err(|error| format!("failed to create ONNX Runtime session builder: {error}"))?
             .with_optimization_level(options.optimization)
             .map_err(|error| format!("failed to configure graph optimization: {error}"))?;
@@ -131,7 +131,7 @@ impl SessionPlan {
             #[cfg(feature = "coreml")]
             Provider::Coreml => {
                 let coreml = options.coreml.execution_provider();
-                let available = coreml.is_available().map_err(|error| {
+                let available = ort::ep::CoreML::is_available().map_err(|error| {
                     format!("failed to query CoreML execution provider: {error}")
                 })?;
                 if !available {

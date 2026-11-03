@@ -1,11 +1,26 @@
 //! Model-agnostic ONNX Runtime inference that publishes outputs as tensor metadata.
 
+use std::sync::OnceLock;
+
 use gst::glib;
 
 #[cfg(feature = "coreml")]
 mod coreml;
 mod engine;
 mod ortinference;
+
+/// Shares the one ONNX Runtime environment allowed per process with plugin callers.
+pub fn environment() -> Result<&'static ort::environment::Environment, String> {
+    static ENVIRONMENT: OnceLock<Result<ort::environment::Environment, String>> = OnceLock::new();
+    ENVIRONMENT
+        .get_or_init(|| {
+            ort::init()
+                .build()
+                .map_err(|error| format!("failed to create ONNX Runtime environment: {error}"))
+        })
+        .as_ref()
+        .map_err(Clone::clone)
+}
 
 fn plugin_init(plugin: &gst::Plugin) -> Result<(), glib::BoolError> {
     ortinference::register(plugin)

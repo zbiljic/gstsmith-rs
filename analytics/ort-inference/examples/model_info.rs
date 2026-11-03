@@ -112,7 +112,7 @@ fn run() -> Result<(), Box<dyn Error>> {
         }
         _ => return Err(USAGE.into()),
     };
-    let session = Session::builder()?
+    let session = Session::builder(gstortinference::environment()?)?
         .with_execution_providers([ort::ep::CPU::default().build().error_on_failure()])?
         .commit_from_file(model)
         .map_err(|error| format!("CPU session load failed: {error}"))?;
@@ -225,6 +225,8 @@ mod tests {
         gst::init()?;
         gstortinference::plugin_register_static()?;
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../inference-common/tests/fixtures");
+        let _session = Session::builder(gstortinference::environment()?)?
+            .commit_from_file(root.join("identity.onnx"))?;
         for (name, mode) in [
             ("identity", "video"),
             ("masked-frames", "video"),
