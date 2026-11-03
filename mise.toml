@@ -1,5 +1,5 @@
 [tools]
-"cargo:cargo-c" = "0.10.25"
+"cargo:cargo-c" = "0.10.26"
 "cargo:cargo-deny" = "0.20.2"
 "cargo:cargo-sort" = "2.1.4"
 ruff = "0.16.10"
