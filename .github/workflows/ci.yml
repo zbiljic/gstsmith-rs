@@ -12,6 +12,12 @@ on:
       - "**.md"
   merge_group:
   workflow_dispatch:
+  workflow_call:
+    inputs:
+      extended:
+        description: Run the full compatibility checks
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -32,6 +38,7 @@ jobs:
     timeout-minutes: 5
     outputs:
       checks: ${{ steps.changes.outputs.checks }}
+      extended: ${{ inputs.extended }}
     steps:
       - name: Checkout
         uses: actions/checkout@v7
@@ -45,7 +52,7 @@ jobs:
         id: changes
         shell: bash
         env:
-          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+          BASE_SHA: ${{ !inputs.extended && (github.event.pull_request.base.sha || github.event.before) || '' }}
         run: python3 ci/select_checks.py "$BASE_SHA" | tee -a "$GITHUB_OUTPUT"
 
   tract-metal:
@@ -80,19 +87,23 @@ jobs:
         run: cargo clippy -p gst-plugin-tract-inference --all-targets --features metal -- -D warnings
 
       - name: Read minimum supported Rust version
+        if: needs.changes.outputs.extended == 'true'
         run: |
           sed -n 's/^rust-version = "\([^"]*\)"$/MSRV=\1/p' Cargo.toml >> "$GITHUB_ENV"
 
       - name: Cache minimum supported Rust version toolchain
+        if: needs.changes.outputs.extended == 'true'
         uses: actions/cache@v6
         with:
           path: ~/.rustup/toolchains/${{ env.MSRV }}-*
           key: rust-msrv-${{ runner.os }}-${{ runner.arch }}-${{ env.MSRV }}
 
       - name: Install minimum supported Rust version toolchain
+        if: needs.changes.outputs.extended == 'true'
         run: mise install "rust@$MSRV"
 
       - name: Test minimum supported Rust version
+        if: needs.changes.outputs.extended == 'true'
         run: cargo +"$MSRV" test --locked -p gst-plugin-tract-inference --all-targets --features metal
 
   ort-coreml:
@@ -135,19 +146,23 @@ jobs:
         run: gst-inspect-1.0 ortinference
 
       - name: Read minimum supported Rust version
+        if: needs.changes.outputs.extended == 'true'
         run: |
           sed -n 's/^rust-version = "\([^"]*\)"$/MSRV=\1/p' Cargo.toml >> "$GITHUB_ENV"
 
       - name: Cache minimum supported Rust version toolchain
+        if: needs.changes.outputs.extended == 'true'
         uses: actions/cache@v6
         with:
           path: ~/.rustup/toolchains/${{ env.MSRV }}-*
           key: rust-msrv-${{ runner.os }}-${{ runner.arch }}-${{ env.MSRV }}
 
       - name: Install minimum supported Rust version toolchain
+        if: needs.changes.outputs.extended == 'true'
         run: mise install "rust@$MSRV"
 
       - name: Test minimum supported Rust version
+        if: needs.changes.outputs.extended == 'true'
         run: cargo +"$MSRV" test --locked -p gst-plugin-ort-inference --all-targets --features coreml
 
   gstreamer-124:
@@ -198,6 +213,7 @@ jobs:
             -p gst-plugin-statsd
 
       - name: Test GStreamer 1.24 plugins
+        if: needs.changes.outputs.extended == 'true'
         run: |
           cargo test --all-targets \
             -p gst-plugin-console \
@@ -210,6 +226,7 @@ jobs:
             -p gst-plugin-statsd
 
       - name: Lint GStreamer 1.24 plugins
+        if: needs.changes.outputs.extended == 'true'
         run: |
           cargo clippy --all-targets \
             -p gst-plugin-console \
@@ -320,10 +337,6 @@ jobs:
         if: fromJSON(needs.changes.outputs.checks).tract
         run: cargo clippy -p gst-plugin-tract-inference --all-targets --no-default-features -- -D warnings
 
-      - name: Check build
-        if: fromJSON(needs.changes.outputs.checks).rust
-        run: mise run check
-
       - name: Run tests
         if: fromJSON(needs.changes.outputs.checks).rust
         run: mise run test
@@ -343,7 +356,7 @@ jobs:
         run: mise run build
 
       - name: Validate cargo-c packages
-        if: fromJSON(needs.changes.outputs.checks).packaging
+        if: needs.changes.outputs.extended == 'true'
         run: mise run package:check
 
       - name: Inspect console plugin
@@ -423,21 +436,21 @@ jobs:
           gst-inspect-1.0 nanodettensordec
 
       - name: Read minimum supported Rust version
-        if: fromJSON(needs.changes.outputs.checks).rust
+        if: needs.changes.outputs.extended == 'true'
         run: |
           sed -n 's/^rust-version = "\([^"]*\)"$/MSRV=\1/p' Cargo.toml >> "$GITHUB_ENV"
 
       - name: Cache minimum supported Rust version toolchain
-        if: fromJSON(needs.changes.outputs.checks).rust
+        if: needs.changes.outputs.extended == 'true'
         uses: actions/cache@v6
         with:
           path: ~/.rustup/toolchains/${{ env.MSRV }}-*
           key: rust-msrv-${{ runner.os }}-${{ runner.arch }}-${{ env.MSRV }}
 
       - name: Install minimum supported Rust version toolchain
-        if: fromJSON(needs.changes.outputs.checks).rust
+        if: needs.changes.outputs.extended == 'true'
         run: mise install "rust@$MSRV"
 
       - name: Test minimum supported Rust version
-        if: fromJSON(needs.changes.outputs.checks).rust
+        if: needs.changes.outputs.extended == 'true'
         run: cargo +"$MSRV" test --workspace --all-targets --locked

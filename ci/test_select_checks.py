@@ -44,6 +44,7 @@ def main():
         "generic/console/Cargo.toml": " ".join(SCOPES),
         ".config/mise/conf.d/rust.toml": " ".join(SCOPES),
         ".github/workflows/ci.yml": " ".join(SCOPES),
+        ".github/workflows/compatibility.yml": " ".join(SCOPES),
         "ci/select_checks.py": " ".join(SCOPES),
         "README.md": "",
         "net/nats/README.md": "",
