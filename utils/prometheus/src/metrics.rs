@@ -1,5 +1,4 @@
 use std::collections::{HashMap, HashSet};
-use std::fmt::Write;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::time::Instant;
@@ -7,9 +6,7 @@ use std::time::Instant;
 use gst::glib;
 use gst::prelude::*;
 use parking_lot::{Mutex, RwLock};
-use prometheus_client::encoding::{
-    EncodeLabelSet, EncodeLabelValue, LabelValueEncoder, text::encode,
-};
+use prometheus_client::encoding::{EncodeLabelSet, text::encode};
 use prometheus_client::metrics::counter::Counter;
 use prometheus_client::metrics::family::Family;
 use prometheus_client::metrics::gauge::Gauge;
@@ -17,49 +14,26 @@ use prometheus_client::metrics::histogram::Histogram;
 use prometheus_client::registry::Registry;
 use regex::Regex;
 
-#[derive(Clone, Debug, Eq, Hash, PartialEq)]
-struct EscapedLabelValue(String);
-
-impl From<String> for EscapedLabelValue {
-    fn from(value: String) -> Self {
-        Self(value)
-    }
-}
-
-impl EncodeLabelValue for EscapedLabelValue {
-    fn encode(&self, encoder: &mut LabelValueEncoder) -> Result<(), std::fmt::Error> {
-        for character in self.0.chars() {
-            match character {
-                '\\' => encoder.write_str("\\\\")?,
-                '"' => encoder.write_str("\\\"")?,
-                '\n' => encoder.write_str("\\n")?,
-                character => encoder.write_char(character)?,
-            }
-        }
-        Ok(())
-    }
-}
-
 #[derive(Clone, Debug, EncodeLabelSet, Eq, Hash, PartialEq)]
 struct PadLabels {
-    element: EscapedLabelValue,
-    pad: EscapedLabelValue,
+    element: String,
+    pad: String,
 }
 
 #[derive(Clone, Debug, EncodeLabelSet, Eq, Hash, PartialEq)]
 struct PipelineLabels {
-    pipeline: EscapedLabelValue,
-    state: EscapedLabelValue,
+    pipeline: String,
+    state: String,
 }
 
 #[derive(Clone, Debug, EncodeLabelSet, Eq, Hash, PartialEq)]
 struct ElementLabels {
-    element: EscapedLabelValue,
+    element: String,
 }
 
 #[derive(Clone, Debug, EncodeLabelSet, Eq, Hash, PartialEq)]
 struct ReasonLabels {
-    reason: EscapedLabelValue,
+    reason: String,
 }
 
 #[derive(Clone)]
@@ -327,7 +301,7 @@ impl Metrics {
         let untracked: Family<ReasonLabels, Counter> = Family::default();
         let untracked_series_limit = untracked
             .get_or_create(&ReasonLabels {
-                reason: "series_limit".to_owned().into(),
+                reason: "series_limit".to_owned(),
             })
             .clone();
         let encoding_failures = Counter::default();
@@ -455,8 +429,8 @@ impl Metrics {
         let pad_name = pad.name().to_string();
         let identity = format!("{element_path}:{pad_name}");
         let labels = PadLabels {
-            element: element_path.into(),
-            pad: pad_name.into(),
+            element: element_path,
+            pad: pad_name,
         };
         let included = self.included(&identity);
         let mut tracked_pad_count = self.tracked_pad_count.lock();
@@ -581,8 +555,8 @@ impl Metrics {
             let mut gauges = Vec::with_capacity(4);
             for state in ["null", "ready", "paused", "playing"] {
                 let label = PipelineLabels {
-                    pipeline: identity.clone().into(),
-                    state: state.to_owned().into(),
+                    pipeline: identity.clone(),
+                    state: state.to_owned(),
                 };
                 let gauge = self.pipeline_state.get_or_create(&label).clone();
                 gauge.set(0);
@@ -721,9 +695,7 @@ impl Metrics {
                 cache.queues.push(CachedQueue {
                     key,
                     entry: Arc::downgrade(&entry),
-                    labels: ElementLabels {
-                        element: identity.into(),
-                    },
+                    labels: ElementLabels { element: identity },
                 });
             }
         }
@@ -859,8 +831,8 @@ mod tests {
         metrics
             .pad_buffers
             .get_or_create(&PadLabels {
-                element: "quoted\"slash\\element".to_owned().into(),
-                pad: "line\npad".to_owned().into(),
+                element: "quoted\"slash\\element".to_owned(),
+                pad: "line\npad".to_owned(),
             })
             .inc();
         let output = metrics.encode().expect("String encoding cannot fail");
@@ -1354,7 +1326,7 @@ mod tests {
                 );
                 for (queue, capacity) in &queues {
                     let labels = ElementLabels {
-                        element: queue.path_string().to_string().into(),
+                        element: queue.path_string().to_string(),
                     };
                     let gauge = metrics
                         .queue_capacity_buffers
