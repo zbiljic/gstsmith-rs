@@ -3,7 +3,7 @@
 "cargo:cargo-deny" = "0.20.2"
 "cargo:cargo-sort" = "2.1.4"
 ruff = "0.16.10"
-rust = { version = "1.99.0", profile = "minimal", components = [
+rust = { version = "1.99.1", profile = "minimal", components = [
   "rustfmt",
   "clippy",
 ] }
