@@ -28,7 +28,7 @@ futures-util = "0.3.34"
 gst = { workspace = true }
 gst-base = { workspace = true }
 s2-sdk = { version = "=0.35.3", default-features = false, features = ["rustls-ring"] }
-tokio = { version = "1.53.2", features = ["rt-multi-thread", "sync", "time"] }
+tokio = { version = "1.54.1", features = ["rt-multi-thread", "sync", "time"] }
 tokio-util = "0.7.20"
 url = "2.5.8"
 

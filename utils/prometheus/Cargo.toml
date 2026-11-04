@@ -33,7 +33,7 @@ papaya = "0.2.5"
 parking_lot = "0.13.0"
 prometheus-client = "0.25.2"
 regex = "1.13.1"
-tokio = { version = "1.53.2", features = ["io-util", "net", "rt", "sync", "time"] }
+tokio = { version = "1.54.1", features = ["io-util", "net", "rt", "sync", "time"] }
 
 [features]
 static = []
