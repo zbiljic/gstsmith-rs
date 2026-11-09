@@ -24,7 +24,7 @@ import_library = false
 requires_private = "gstreamer-1.0, gstreamer-base-1.0, gobject-2.0, glib-2.0, gmodule-2.0"
 
 [dependencies]
-async-nats = { version = "0.51.0", default-features = false, features = ["ring", "nkeys"] }
+async-nats = { version = "0.52.0", default-features = false, features = ["ring", "nkeys"] }
 futures-util = "0.3.34"
 gst = { workspace = true }
 gst-base = { workspace = true }
