@@ -3671,7 +3671,7 @@ dependencies = [
  "itertools 0.15.0",
  "mime",
  "prost",
- "s2-common",
+ "s2-common 0.42.1",
  "serde",
  "serde_json",
  "strum",
@@ -3701,10 +3701,29 @@ dependencies = [
 ]
 
 [[package]]
-name = "s2-sdk"
-version = "0.35.3"
+name = "s2-common"
+version = "0.43.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9d90795a9d983bbaf293807766183f0e92abfe9bd7ba2ccdfa97799664c1f825"
+checksum = "1f2010cfadf3090aa1525c16dc9677c43184cd2c568f51c3a89985a16640b1d0"
+dependencies = [
+ "base64ct",
+ "bytes",
+ "compact_str",
+ "enumset",
+ "http",
+ "rand 0.10.2",
+ "secrecy",
+ "serde",
+ "strum",
+ "thiserror",
+ "time",
+]
+
+[[package]]
+name = "s2-sdk"
+version = "0.35.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0881ba7ba850ad80816ad3840e29c7c0a81f9a56cae3b78dd83bdbbc103cba97"
 dependencies = [
  "async-compression",
  "async-stream",
@@ -3725,7 +3744,7 @@ dependencies = [
  "rand 0.10.2",
  "rustls",
  "s2-api",
- "s2-common",
+ "s2-common 0.43.0",
  "secrecy",
  "serde",
  "serde_json",
