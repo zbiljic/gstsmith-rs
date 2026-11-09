@@ -586,7 +586,7 @@ mod tests {
         if !model
             .nodes()
             .iter()
-            .any(TypedNode::op_is::<tract_metal::ops::conv::MetalConv>)
+            .any(|node| node.op().name() == "MetalConv")
         {
             return Err(std::io::Error::other(
                 "fixture convolution was not translated to Tract's stable MetalConv operation",
