@@ -1556,7 +1556,7 @@ dependencies = [
  "gstreamer",
  "gstreamer-base",
  "gstreamer-check",
- "s2-sdk",
+ "s2-sdk 0.35.4",
  "s2-testcontainers",
  "tokio",
  "tokio-util",
@@ -3664,7 +3664,33 @@ dependencies = [
  "itertools 0.15.0",
  "mime",
  "prost",
- "s2-common",
+ "s2-common 0.43.0",
+ "serde",
+ "serde_json",
+ "strum",
+ "thiserror",
+ "time",
+ "tokio-util",
+ "zstd 0.14.3",
+]
+
+[[package]]
+name = "s2-api"
+version = "0.44.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "80352c30793203d110feb2ad3c6fc9b28b8aea5c4723d1d64123b5ccdaaac4b5"
+dependencies = [
+ "base64ct",
+ "bytes",
+ "compact_str",
+ "flate2",
+ "futures-core",
+ "futures-util",
+ "http",
+ "itertools 0.15.0",
+ "mime",
+ "prost",
+ "s2-common 0.44.3",
  "serde",
  "serde_json",
  "strum",
@@ -3679,6 +3705,25 @@ name = "s2-common"
 version = "0.43.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1f2010cfadf3090aa1525c16dc9677c43184cd2c568f51c3a89985a16640b1d0"
+dependencies = [
+ "base64ct",
+ "bytes",
+ "compact_str",
+ "enumset",
+ "http",
+ "rand 0.10.2",
+ "secrecy",
+ "serde",
+ "strum",
+ "thiserror",
+ "time",
+]
+
+[[package]]
+name = "s2-common"
+version = "0.44.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fbb09e47af77f2b3ee6638abb9e47b732fed5f0b8cc36fd8db98486fcd158ce4"
 dependencies = [
  "base64ct",
  "bytes",
@@ -3717,8 +3762,8 @@ dependencies = [
  "prost",
  "rand 0.10.2",
  "rustls",
- "s2-api",
- "s2-common",
+ "s2-api 0.32.2",
+ "s2-common 0.43.0",
  "secrecy",
  "serde",
  "serde_json",
@@ -3726,7 +3771,48 @@ dependencies = [
  "thiserror",
  "time",
  "tokio",
- "tokio-muxt",
+ "tokio-muxt 0.7.0",
+ "tokio-stream",
+ "tokio-util",
+ "tracing",
+ "urlencoding",
+ "uuid",
+]
+
+[[package]]
+name = "s2-sdk"
+version = "0.44.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ff10f457a8355c981ce71e39003c3cceca39543de6a1d3e9ff634206249ee728"
+dependencies = [
+ "async-compression",
+ "async-stream",
+ "async-trait",
+ "bytes",
+ "compact_str",
+ "futures-core",
+ "futures-util",
+ "h2",
+ "http",
+ "http-body",
+ "http-body-util",
+ "hyper",
+ "hyper-rustls",
+ "hyper-util",
+ "pin-project-lite",
+ "prost",
+ "rand 0.10.2",
+ "rustls",
+ "s2-api 0.44.3",
+ "s2-common 0.44.3",
+ "secrecy",
+ "serde",
+ "serde_json",
+ "serde_urlencoded",
+ "thiserror",
+ "time",
+ "tokio",
+ "tokio-muxt 0.8.1",
  "tokio-stream",
  "tokio-util",
  "tracing",
@@ -3736,12 +3822,12 @@ dependencies = [
 
 [[package]]
 name = "s2-testcontainers"
-version = "0.44.0"
+version = "0.44.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "15d73148f3b786e1b4f0a65daad3a6bfedc8f6a420d503397a51e5e3d1ae2a0b"
+checksum = "444dff9ae6617a8373bb14ac9e7f38f22a9adf184614434bc2e54e60b41c166b"
 dependencies = [
  "reqwest",
- "s2-sdk",
+ "s2-sdk 0.44.3",
  "testcontainers",
  "thiserror",
  "tokio",
@@ -4394,6 +4480,16 @@ name = "tokio-muxt"
 version = "0.7.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f79eac432d68f5cc5ca99654adddb6ffc9501618bc267303d18a1f768ea01e7c"
+dependencies = [
+ "pin-project",
+ "tokio",
+]
+
+[[package]]
+name = "tokio-muxt"
+version = "0.8.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a08b20f8324114e2639a1a251692cc8a4154aa311bee55a83bdc82826b09a3b1"
 dependencies = [
  "pin-project",
  "tokio",
