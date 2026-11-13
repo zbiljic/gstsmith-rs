@@ -44,6 +44,11 @@
       "rangeStrategy": "pin"
     },
     {
+      "description": ["Keep S2 SDK and testcontainers compatible"],
+      "matchPackageNames": ["s2-sdk", "s2-testcontainers"],
+      "groupName": "S2 workspace crates"
+    },
+    {
       "description": ["Keep OCRs and RTen workspace crates compatible"],
       "matchPackageNames": ["ocrs", "rten", "rten-imageproc"],
       "groupName": "OCRs and RTen workspace crates"
