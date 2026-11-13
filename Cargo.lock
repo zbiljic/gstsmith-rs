@@ -3695,9 +3695,9 @@ dependencies = [
 
 [[package]]
 name = "s2-sdk"
-version = "0.44.1"
+version = "0.44.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f5e11e8cf77e37d7974e946113aa5611493407d497bef11a426e0208ebb2093f"
+checksum = "ff10f457a8355c981ce71e39003c3cceca39543de6a1d3e9ff634206249ee728"
 dependencies = [
  "async-compression",
  "async-stream",
@@ -3736,9 +3736,9 @@ dependencies = [
 
 [[package]]
 name = "s2-testcontainers"
-version = "0.44.1"
+version = "0.44.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "444dff9ae6617a8373bb14ac9e7f38f22a9adf184614434bc2e54e60b41c166b"
+checksum = "4fe443175e81b1252b306cef24d136df55f6c2cd783d624f94fcb53254c07973"
 dependencies = [
  "reqwest",
  "s2-sdk",
