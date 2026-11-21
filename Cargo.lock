@@ -3654,9 +3654,9 @@ checksum = "9774ba4a74de5f7b1c1451ed6cd5285a32eddb5cccb8cc655a4e50009e06477f"
 
 [[package]]
 name = "s2-api"
-version = "0.45.0"
+version = "0.46.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "728068232587afa89add4ccfd8602dcb9cf4e52c32fe35c3593c0079e2ac7ee2"
+checksum = "2247f11cd7de8da044ba05103e49b5498017104f0f70d9cb08110b279cbee8e3"
 dependencies = [
  "base64ct",
  "bytes",
@@ -3680,9 +3680,9 @@ dependencies = [
 
 [[package]]
 name = "s2-common"
-version = "0.45.0"
+version = "0.46.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bdd0f8e784c2c0de7846157fd2f70bfd451e0e6f41e58fd7701af3e7f1036420"
+checksum = "f1be438ee66a9f200adb315ef4dd73ecbbb6a02e3ca6a07b0dfff7d88e44292e"
 dependencies = [
  "base64ct",
  "bytes",
@@ -3699,9 +3699,9 @@ dependencies = [
 
 [[package]]
 name = "s2-sdk"
-version = "0.45.0"
+version = "0.46.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1883848c1ec157042537930b917549fd58f8f8a59fcfeda1884060ba2c6db7b8"
+checksum = "5f1a2c032b394379d1898d9a1996e3c4c9283ce66ddb8ad010d8fc90c9b2b7bd"
 dependencies = [
  "async-compression",
  "async-stream",
@@ -3740,9 +3740,9 @@ dependencies = [
 
 [[package]]
 name = "s2-testcontainers"
-version = "0.45.0"
+version = "0.46.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "783e385aa9f83e1d98c1003f2da76ea0cbb9f09be7a8aae62975d1d8df8c83ea"
+checksum = "1cadf6214644e76446e3a6c0cfca2802d453a6460bb8272502585e2206fc030a"
 dependencies = [
  "reqwest",
  "s2-sdk",
